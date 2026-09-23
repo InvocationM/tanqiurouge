@@ -6,6 +6,7 @@ local.properties
 android/
 www/capacitor.js
 www/cap-app.js
+www/assets/game_resources.pack
 hykb-sdk/libs/*
 !hykb-sdk/libs/.gitkeep
 !hykb-sdk/libs/hykb-common.aar

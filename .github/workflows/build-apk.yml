@@ -9,6 +9,8 @@ env:
   APP_ID: com.zyy.mori
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  # 已打包 CC0 音频/背景（www/assets）；无需垫包时设为 0
+  APK_BULK_MB: "0"
 
 jobs:
   build:
@@ -91,6 +93,7 @@ jobs:
               )
           gradle.write_text(gtext, encoding="utf-8")
           PY
+          node scripts/patch-android-no-compress-pack.cjs
 
       - name: Apply app launcher icon
         run: node scripts/apply-android-icon.cjs
