@@ -85,17 +85,16 @@ const SFX={
   swap(){ tone(600,0.07,"square",0.12,820); },
   split(){ [660,880,1170].forEach((f,i)=>tone(f,0.1,"sine",0.16,null,i*0.05)); },
 };
-// CC0 文件 BGM（见 assets/CREDITS.md）；失败则回退程序化海洋 BGM
-const BGM_FILE = "assets/audio/exploration_theme.ogg";
+// 海洋风格 BGM：五声音阶舒缓旋律 + 低音铺底 + 水滴琶音
 const BGM_MELODY = [523,587,659,784,880,784,659,587, 523,587,659,784,880,1047,880,784,
                     698,784,880,988,880,784,698,659, 587,659,587,523,440,523,587,523];
 const BGM_BASS = [131,165,196,165, 147,185,220,185];
-let fileBgm=null;
-function startProceduralBGM(){
+function startBGM(){
   if(bgmTimer) return;
   bgmStep=0;
   bgmTimer=setInterval(()=>{
     if(!bgmOn||!sfxOn) return;
+    // 主旋律（舒缓长音）
     const f=BGM_MELODY[bgmStep%BGM_MELODY.length];
     tone(f,0.6,"sine",0.05);
     if(!PERF_LIGHT) tone(f*2,0.4,"sine",0.02);
@@ -111,28 +110,7 @@ function startProceduralBGM(){
     bgmStep++;
   },BGM_TICK_MS);
 }
-function startBGM(){
-  if(!bgmOn||!sfxOn) return;
-  if(bgmTimer) return;
-  if(!fileBgm){
-    fileBgm=new Audio(BGM_FILE);
-    fileBgm.loop=true;
-    fileBgm.volume=0.36;
-  }
-  fileBgm.play().catch(()=>{ fileBgm=null; startProceduralBGM(); });
-}
-function stopBGM(){
-  if(fileBgm){ fileBgm.pause(); fileBgm.currentTime=0; }
-  if(bgmTimer){clearInterval(bgmTimer);bgmTimer=null;}
-}
-const BG_IMG_HD = "assets/bg/underwater_bg_hd.png";
-const BG_IMG_TILE = "assets/bg/underwater_tileable.png";
-let bgImgHd=null, bgImgTile=null;
-(function loadBgAssets(){
-  function load(src, set){ const im=new Image(); im.onload=()=>set(im); im.onerror=()=>{}; im.src=src; }
-  load(BG_IMG_HD, im=>{ bgImgHd=im; });
-  load(BG_IMG_TILE, im=>{ bgImgTile=im; });
-})();
+function stopBGM(){ if(bgmTimer){clearInterval(bgmTimer);bgmTimer=null;} }
 /* ============================================================
    配置数据（源自弹球肉鸽.xlsx / 弹球表 / 鱼类表 / 效果表 / 关卡表）
    逻辑分辨率 1080 x 2160
@@ -838,22 +816,9 @@ function restartGame(){
    ============================================================ */
 function drawBackground(){
   const liteBg = PERF_LIGHT && (state===ST.PLAY || state===ST.AIM);
-  if(state===ST.MENU && bgImgHd){
-    ctx.drawImage(bgImgHd,0,0,W,H);
-    const v=ctx.createLinearGradient(0,0,0,H);
-    v.addColorStop(0,"rgba(8,40,80,0.25)"); v.addColorStop(1,"rgba(2,10,28,0.55)");
-    ctx.fillStyle=v; ctx.fillRect(0,0,W,H);
-    return;
-  }else if(liteBg && bgImgTile){
-    const pat=ctx.createPattern(bgImgTile,"repeat");
-    if(pat){ ctx.fillStyle=pat; ctx.fillRect(0,0,W,H); }
-    ctx.fillStyle="rgba(4,22,48,0.42)"; ctx.fillRect(0,0,W,H);
-  }
   if(liteBg){
-    if(!bgImgTile){
-      ctx.fillStyle="#0b3d70";
-      ctx.fillRect(0,0,W,H);
-    }
+    ctx.fillStyle="#0b3d70";
+    ctx.fillRect(0,0,W,H);
     ctx.strokeStyle="rgba(180,225,255,.14)";
     bubbles.forEach(b=>{
       if(b.y>=FIELD_TOP-40 && b.y<=FIELD_BOT+40){
