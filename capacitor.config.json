@@ -1,0 +1,11 @@
+{
+  "appId": "com.zyy.mori",
+  "appName": "弹球肉鸽",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

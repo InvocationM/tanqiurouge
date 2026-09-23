@@ -1,0 +1,1520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>弹球肉鸽 · 深海弹射</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#04122b; font-family:"PingFang SC","Microsoft YaHei",sans-serif; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  #game { display:block; background:#04122b; touch-action:none; box-shadow:0 0 60px rgba(0,180,255,.25); }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   音频引擎（Web Audio 程序化合成，无外部文件）
+   ============================================================ */
+let AC=null, masterGain=null, sfxOn=true, bgmOn=true, bgmTimer=null, bgmStep=0, lastBounceSnd=0;
+function ac(){
+  if(!AC){ AC=new (window.AudioContext||window.webkitAudioContext)(); masterGain=AC.createGain(); masterGain.gain.value=0.5; masterGain.connect(AC.destination); }
+  if(AC.state==="suspended") AC.resume();
+  return AC;
+}
+function tone(freq,dur,type="sine",vol=0.3,slideTo=null,delay=0){
+  if(!sfxOn) return;
+  try{
+    const a=ac(); const t=a.currentTime+delay;
+    const o=a.createOscillator(), g=a.createGain();
+    o.type=type; o.frequency.setValueAtTime(freq,t);
+    if(slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo),t+dur);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.linearRampToValueAtTime(vol,t+0.012);
+    g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.connect(g); g.connect(masterGain); o.start(t); o.stop(t+dur+0.05);
+  }catch(e){}
+}
+function noiseBurst(dur,vol=0.2,delay=0){
+  if(!sfxOn) return;
+  try{
+    const a=ac(); const t=a.currentTime+delay;
+    const buf=a.createBuffer(1,Math.floor(a.sampleRate*dur),a.sampleRate);
+    const d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*(1-i/d.length);
+    const src=a.createBufferSource(); src.buffer=buf;
+    const g=a.createGain(); g.gain.value=vol;
+    src.connect(g); g.connect(masterGain); src.start(t);
+  }catch(e){}
+}
+const SFX={
+  launch(){ tone(380,0.16,"sine",0.22,950); },
+  bounce(){
+    const now=performance.now();
+    if(now-lastBounceSnd<60) return; // 节流，避免一帧多碰爆音
+    lastBounceSnd=now;
+    tone(220,0.05,"square",0.08,160);
+  },
+  hit(){ tone(320,0.09,"triangle",0.25,180); noiseBurst(0.04,0.08); },
+  crit(){ tone(160,0.22,"sawtooth",0.3,70); noiseBurst(0.12,0.18); },
+  kill(){ tone(780,0.08,"square",0.18,1150); tone(1180,0.12,"square",0.16,1500,0.06); },
+  coin(){ tone(1320,0.08,"sine",0.12,1760); },
+  reward(){ [523,659,784,1047].forEach((f,i)=>tone(f,0.16,"sine",0.22,null,i*0.08)); },
+  win(){ [523,659,784,1047,1319,1568].forEach((f,i)=>tone(f,0.22,"triangle",0.24,null,i*0.11)); },
+  lose(){ [392,330,262,196].forEach((f,i)=>tone(f,0.28,"sawtooth",0.18,null,i*0.16)); },
+  swap(){ tone(600,0.07,"square",0.12,820); },
+  split(){ [660,880,1170].forEach((f,i)=>tone(f,0.1,"sine",0.16,null,i*0.05)); },
+};
+// 海洋风格 BGM：五声音阶舒缓旋律 + 低音铺底 + 水滴琶音
+const BGM_MELODY = [523,587,659,784,880,784,659,587, 523,587,659,784,880,1047,880,784,
+                    698,784,880,988,880,784,698,659, 587,659,587,523,440,523,587,523];
+const BGM_BASS = [131,165,196,165, 147,185,220,185];
+function startBGM(){
+  if(bgmTimer) return;
+  bgmStep=0;
+  bgmTimer=setInterval(()=>{
+    if(!bgmOn||!sfxOn) return;
+    // 主旋律（舒缓长音）
+    const f=BGM_MELODY[bgmStep%BGM_MELODY.length];
+    tone(f,0.6,"sine",0.05);
+    tone(f*2,0.4,"sine",0.02); // 高八度泛音
+    // 低音铺底（每4步）
+    if(bgmStep%4===0){
+      const bf=BGM_BASS[(bgmStep/4)%BGM_BASS.length|0];
+      tone(bf,1.2,"triangle",0.04);
+      tone(bf*1.5,1.0,"sine",0.02);
+    }
+    // 随机水滴音（偶尔）
+    if(Math.random()<0.25){
+      const drop=[1047,1175,1319,1568][Math.floor(Math.random()*4)];
+      tone(drop,0.3,"sine",0.03,null,0);
+    }
+    bgmStep++;
+  },420);
+}
+function stopBGM(){ if(bgmTimer){clearInterval(bgmTimer);bgmTimer=null;} }
+/* ============================================================
+   配置数据（源自弹球肉鸽.xlsx / 弹球表 / 鱼类表 / 效果表 / 关卡表）
+   逻辑分辨率 1080 x 2160
+   ============================================================ */
+const W = 1080, H = 2160;
+const TOP_UI = 150, BOT_UI = 460;          // 顶部/底部 UI 高度
+const FIELD_TOP = TOP_UI, FIELD_BOT = H - BOT_UI;
+const LAUNCH = { x: W/2, y: (FIELD_TOP+FIELD_BOT)/2 };
+
+// 弹球表
+const BALLS = {
+ 1:{name:"基础球", atk:10, speed:1000, rebound:3, effect:0, color:"#4fc3f7", glow:"#81d4fa"},
+ 2:{name:"弹弹球", atk:15, speed:1000, rebound:6, effect:0, color:"#81c784", glow:"#a5d6a7"},
+ 3:{name:"快速球", atk:15, speed:4000, rebound:4, effect:0, color:"#fff176", glow:"#fff59d"},
+ 4:{name:"大力球", atk:30, speed:800,  rebound:3, effect:0, color:"#ef5350", glow:"#e57373"},
+ 5:{name:"平衡球", atk:20, speed:1000, rebound:5, effect:0, color:"#ba68c8", glow:"#ce93d8"},
+ 6:{name:"双子球", atk:50, speed:1000, rebound:4, effect:6, color:"#e040fb", glow:"#ea80fc"},
+ 7:{name:"避障球", atk:40, speed:1000, rebound:8, effect:7, color:"#00c853", glow:"#69f0ae"},
+ 8:{name:"分裂球", atk:40, speed:4000, rebound:5, effect:8, color:"#00bcd4", glow:"#80deea"},
+ 9:{name:"幸运球", atk:80, speed:1000, rebound:4, effect:9, color:"#ffd600", glow:"#ffe57f"},
+ 10:{name:"暴击球", atk:60, speed:1000, rebound:6, effect:10,color:"#ff1744", glow:"#ff8a80"},
+ 11:{name:"闪电球", atk:100,speed:2000, rebound:6, effect:1, color:"#f9d71c", glow:"#fff59d"},
+ 12:{name:"火焰球", atk:100,speed:1200, rebound:6, effect:2, color:"#ff5722", glow:"#ff8a65"},
+ 13:{name:"毒液球", atk:100,speed:1200, rebound:10,effect:3, color:"#7cb342", glow:"#9ccc65"},
+ 14:{name:"冰冻球", atk:100,speed:1200, rebound:6, effect:4, color:"#4dd0e1", glow:"#80deea"},
+ 15:{name:"穿透球", atk:100,speed:1200, rebound:4, effect:5, color:"#ff7043", glow:"#ffab91"},
+};
+// 特效完整效果说明
+const EFFECT_DESC = {
+ 1:"碰撞鱼时放出闪电，攻击最近的2条鱼，造成当前攻击力伤害",
+ 2:"碰撞鱼时爆炸，对100范围内的其它鱼造成当前攻击力伤害",
+ 3:"碰撞鱼时使其中毒，每秒造成一半攻击力伤害，持续5秒（可致死）",
+ 4:"碰撞鱼时使其冻结停止移动，下次受到伤害时伤害翻倍",
+ 5:"碰障碍物和边界会反弹，碰鱼不反弹但仍消耗弹射次数",
+ 6:"发射时反方向同时再发射一个同属性的球",
+ 7:"碰撞障碍物时不消耗次数，只有碰鱼和边界才消耗次数",
+ 8:"次数耗尽消失时，向间隔120°的3个方向各发射一个基础球",
+ 9:"消灭鱼获得金钱时，额外获得20金钱",
+ 10:"造成伤害时50%概率打出双倍伤害",
+};
+// 效果表（局内全局加成，可叠加）
+const EFFECTS = {
+ 1:{name:"攻击力Ⅰ",   atk:5,  rebound:0, speed:0,  word:"所有弹球攻击 +5"},
+ 2:{name:"攻击力Ⅱ",   atk:10, rebound:0, speed:0,  word:"所有弹球攻击 +10"},
+ 3:{name:"攻击力Ⅲ",   atk:15, rebound:0, speed:0,  word:"所有弹球攻击 +15"},
+ 4:{name:"攻击力Ⅳ",   atk:20, rebound:0, speed:0,  word:"所有弹球攻击 +20"},
+ 5:{name:"攻击力Ⅴ",   atk:25, rebound:0, speed:0,  word:"所有弹球攻击 +25"},
+ 6:{name:"攻击力Ⅵ",   atk:30, rebound:0, speed:0,  word:"所有弹球攻击 +30"},
+ 7:{name:"速度Ⅰ",     atk:0,  rebound:0, speed:100, word:"所有弹球速度 +100"},
+ 8:{name:"速度Ⅱ",     atk:0,  rebound:0, speed:200, word:"所有弹球速度 +200"},
+ 9:{name:"速度Ⅲ",     atk:0,  rebound:0, speed:300, word:"所有弹球速度 +300"},
+ 10:{name:"速度Ⅳ",    atk:0,  rebound:0, speed:400, word:"所有弹球速度 +400"},
+ 11:{name:"速度Ⅴ",    atk:0,  rebound:0, speed:500, word:"所有弹球速度 +500"},
+ 12:{name:"速度Ⅵ",    atk:0,  rebound:0, speed:600, word:"所有弹球速度 +600"},
+ 13:{name:"弹射Ⅰ",    atk:0,  rebound:1, speed:0,  word:"所有弹球弹射 +1"},
+ 14:{name:"弹射Ⅱ",    atk:0,  rebound:2, speed:0,  word:"所有弹球弹射 +2"},
+ 15:{name:"弹射Ⅲ",    atk:0,  rebound:3, speed:0,  word:"所有弹球弹射 +3"},
+ 16:{name:"王者祝福Ⅰ", atk:5, rebound:1, speed:100, word:"攻击+5 速度+100 弹射+1"},
+ 17:{name:"王者祝福Ⅱ", atk:10,rebound:2, speed:200, word:"攻击+10 速度+200 弹射+2"},
+ 18:{name:"王者祝福Ⅲ", atk:15,rebound:3, speed:300, word:"攻击+15 速度+300 弹射+3"},
+};
+// 鱼类表（id, 金钱, 生命, 速度, 转向区间）
+const FISH_DEFS = [
+ [1,20,10],[2,25,20],[3,30,30],[4,35,40],[5,40,50],
+ [6,45,70],[7,50,90],[8,55,110],[9,60,130],[10,65,150],
+ [11,70,170],[12,75,190],[13,80,210],[14,85,230],[15,90,250],
+ [16,95,270],[17,100,290],[18,105,310],[19,110,330],[20,120,350],
+ [21,130,400],[22,140,450],[23,150,500],[24,160,550],[25,170,600],
+ [26,180,650],[27,190,700],[28,200,750],[29,210,800],[30,220,850],
+ [31,230,900],[32,240,1000],[33,250,1100],[34,260,1200],[35,270,1300],
+ [36,280,1400],[37,290,1500],[38,300,1600],[39,310,1700],[40,320,1800],
+ [41,330,1900],[42,340,2000],[43,350,2500],[44,360,3000],[45,370,3500],
+ [46,380,4000],[47,390,4500],[48,400,5000],[49,410,5500],[50,420,6000],
+ [51,430,6500],[52,440,7000]
+];
+// 关卡表: [目标, 鱼类配置, 障碍数, 奖励弹球权重串, 奖励效果权重串]
+const L1B="1_100;2_100;3_100;4_100;5_100;", L1E="1_100;2_100;7_100;8_100;13_200;16_50;";
+const L2B="1_100;2_100;3_100;4_100;5_100;6_200;7_200;8_200;9_200;10_200;",
+      L2E="1_100;2_100;7_100;8_100;13_200;16_50;3_200;4_200;9_200;10_200;14_400;17_100;";
+const L3B="1_100;2_100;3_100;4_100;5_100;6_200;7_200;8_200;9_200;10_200;11_300;12_300;13_300;14_300;15_300;",
+      L3E="1_100;2_100;7_100;8_100;13_200;16_50;3_200;4_200;9_200;10_200;14_400;17_100;5_300;6_300;11_300;12_300;18_150;";
+const LEVELS = (()=>{
+  const targets=[50,110,170,230,300,380,460,550,650,760,880,1156,1487,1884,2360,2932,3618,4441,5429,6614,8036,9743,11791,14249,17198,20737,24984,30080,36196,43535,50874,58213,65552,72891,80230,87569,94908,102247,109586,116925,124264,131603,138942,146281,153620,160959,168298,175637,182976,190315];
+  const arr=[];
+  for(let i=0;i<50;i++){
+    const lv=i+1;
+    const f1=lv, f2=lv+1, f3=lv+2;
+    const fish = lv===1 ? "1_5;2_5;" : (f1+"_5;"+f2+"_5;"+f3+"_10;");
+    const obs = lv===1?2 : lv===2?3 : lv===3?4 : 5;
+    const ball = lv<=9?L1B : lv<=19?L2B : L3B;
+    const eff  = lv<=9?L1E : lv<=19?L2E : L3E;
+    arr.push({target:targets[i], fish, obs, ball, eff});
+  }
+  return arr;
+})();
+
+/* ============================================================
+   Canvas 初始化
+   ============================================================ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fitCanvas(){
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const scale = Math.min(window.innerWidth/W, window.innerHeight/H);
+  canvas.style.width  = (W*scale)+'px';
+  canvas.style.height = (H*scale)+'px';
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', fitCanvas); fitCanvas();
+
+/* ============================================================
+   游戏状态
+   ============================================================ */
+const ST = { MENU:0, AIM:1, PLAY:2, REWARD:3, SETTLE:4, OVER:5, WIN:6, TALENT:7 };
+let state = ST.MENU;
+let levelIdx = 0;            // 0-based
+let ballPool = [];           // 本局拥有的弹球（id 列表）
+let curBall = 0;             // 当前选中的待发射球索引
+let used = [];               // 每关各球是否已发射
+let gBonus = {atk:0, rebound:0, speed:0};  // 累计全局加成
+let money = 0;
+// ===== 天赋系统（持久化）=====
+const TALENT_NAMES = {1:"攻击",2:"速度",3:"金钱",4:"弹射"};
+const TALENT_DESC = {1:"+1 全局攻击",2:"+10 全局速度",3:"+5 杀鱼金钱",4:"+1 全局弹射"};
+const TALENTS = (()=>{
+  const arr=[]; const seq=[1,2,1,2,3,1,2,1,2];
+  for(let i=1;i<=100;i++){
+    const g=(i-1)%10;
+    const type = g===9 ? 4 : seq[g];
+    arr.push({id:i, exp:i, type:type});
+  }
+  return arr;
+})();
+let totalExp=0, talentUnlocked=0, moneyTalent=0;
+let talentScroll=0, talentDrag=null;
+function loadSave(){
+  try{
+    totalExp = parseInt(localStorage.getItem('pb_totalExp')||'0')||0;
+    talentUnlocked = parseInt(localStorage.getItem('pb_talent')||'0')||0;
+  }catch(e){ totalExp=0; talentUnlocked=0; }
+  if(talentUnlocked>TALENTS.length) talentUnlocked=TALENTS.length;
+}
+function saveSave(){
+  try{
+    localStorage.setItem('pb_totalExp', totalExp);
+    localStorage.setItem('pb_talent', talentUnlocked);
+  }catch(e){}
+}
+function talentBonus(){
+  const b={atk:0,speed:0,money:0,rebound:0};
+  for(let i=0;i<talentUnlocked && i<TALENTS.length;i++){
+    const t=TALENTS[i];
+    if(t.type===1) b.atk+=1;
+    else if(t.type===2) b.speed+=10;
+    else if(t.type===3) b.money+=5;
+    else if(t.type===4) b.rebound+=1;
+  }
+  return b;
+}
+let fishes = [], balls=[], obstacles=[], particles=[], floats=[];
+let aim = null;              // {x,y} 瞄准点（逻辑坐标）
+let settleTimer = 0;
+let rewardPicks = [];
+let bubbles = [];
+let plankton = [];
+let screenShake = 0;
+
+// 背景气泡
+for(let i=0;i<40;i++) bubbles.push({x:Math.random()*W, y:Math.random()*H, r:2+Math.random()*8, s:10+Math.random()*30});
+// 浮游颗粒（marine snow）
+for(let i=0;i<70;i++) plankton.push({
+  x:Math.random()*W, y:FIELD_TOP+Math.random()*(FIELD_BOT-FIELD_TOP),
+  r:1+Math.random()*2.6, s:8+Math.random()*22,
+  ph:Math.random()*6.28, dr:0.3+Math.random()*0.6
+});
+
+function curBallDef(){ return BALLS[ballPool[curBall]]; }
+function effBall(b){ const d=BALLS[b]; return {
+  atk:d.atk+gBonus.atk, speed:d.speed+gBonus.speed, rebound:d.rebound+gBonus.rebound,
+  effect:d.effect, color:d.color, glow:d.glow, name:d.name }; }
+
+/* ============================================================
+   关卡构建
+   ============================================================ */
+function parseWeight(str){
+  const out=[]; str.split(';').forEach(s=>{ s=s.trim(); if(!s)return;
+    const [id,w]=s.split('_').map(Number); out.push({id,w}); });
+  return out;
+}
+function startLevel(){
+  const L = LEVELS[levelIdx];
+  fishes=[]; balls=[]; obstacles=[]; particles=[]; floats=[];
+  used = ballPool.map(()=>false);
+  curBall = firstUnused();
+  settleTimer=0;
+  // 生成鱼
+  const fishCfg = L.fish.split(';').filter(s=>s.trim()).map(s=>{
+    const [id,n]=s.split('_').map(Number); return {id,n};
+  });
+  fishCfg.forEach(cfg=>{
+    const def = FISH_DEFS[cfg.id-1];
+    for(let i=0;i<cfg.n;i++) spawnFish(def[0], def[1], def[2]);
+  });
+  // 生成障碍
+  for(let i=0;i<L.obs;i++) spawnObstacle();
+}
+function spawnFish(id, money, hp){
+  const r = 46 + (id%5)*4;
+  let x,y,tries=0;
+  do{
+    x = 120+Math.random()*(W-240);
+    y = FIELD_TOP+120+Math.random()*(FIELD_BOT-FIELD_TOP-240);
+    tries++;
+  }while(tries<30 && Math.hypot(x-LAUNCH.x,y-LAUNCH.y) < 220);
+  const ang = Math.random()*Math.PI*2;
+  const [tMin,tMax] = [20,30];  // 转向频率 20_30（单位10=1秒）
+  fishes.push({
+    id, x, y, r, hp, maxHp:hp, money,
+    vx:Math.cos(ang)*100, vy:Math.sin(ang)*100,
+    nextTurn: (tMin+Math.random()*(tMax-tMin))/10,
+    poison:0, poisonDps:0, frozen:false, doubleNext:false,
+    wobble: Math.random()*Math.PI*2
+  });
+}
+function spawnObstacle(){
+  const r = 45+Math.random()*40;
+  let x,y,tries=0;
+  do{
+    x = 100+Math.random()*(W-200);
+    y = FIELD_TOP+100+Math.random()*(FIELD_BOT-FIELD_TOP-200);
+    tries++;
+  }while(tries<40 && (Math.hypot(x-LAUNCH.x,y-LAUNCH.y)<260 ||
+       obstacles.some(o=>Math.hypot(x-o.x,y-o.y)<o.r+r+60)));
+  obstacles.push({x,y,r, kind: Math.floor(Math.random()*4), seed: Math.random()*10});
+}
+
+// 找下一个未发射的球（循环）
+function firstUnused(){
+  for(let i=0;i<ballPool.length;i++) if(!used[i]) return i;
+  return 0;
+}
+function swapBall(dir){
+  const n = ballPool.length;
+  for(let step=1; step<=n; step++){
+    const idx = ((curBall + dir*step) % n + n) % n;
+    if(!used[idx]){ curBall = idx; SFX.swap(); return; }
+  }
+}
+// 右下角左右切换球按钮
+const SWAP_LEFT = { x: W-200, y: FIELD_BOT+290, r: 44 };
+const SWAP_RIGHT = { x: W-70, y: FIELD_BOT+290, r: 44 };
+let recycleBonus=0; // 剩余球回收奖励
+
+/* ============================================================
+   弹球发射与物理
+   ============================================================ */
+function spawnBall(x,y,dx,dy,b){
+  balls.push({
+    x, y, vx:dx*b.speed, vy:dy*b.speed,
+    r:22, atk:b.atk, rebound:b.rebound, effect:b.effect,
+    color:b.color, glow:b.glow, trail:[]
+  });
+}
+function launchBall(tx,ty){
+  ac(); // 用户手势里初始化音频
+  const b = effBall(ballPool[curBall]);
+  let dx=tx-LAUNCH.x, dy=ty-LAUNCH.y;
+  const len=Math.hypot(dx,dy)||1; dx/=len; dy/=len;
+  spawnBall(LAUNCH.x, LAUNCH.y, dx, dy, b);
+  SFX.launch();
+  if(b.effect===6){ // 双子球：反方向再发一个同属性球
+    spawnBall(LAUNCH.x, LAUNCH.y, -dx, -dy, b);
+  }
+  used[curBall] = true;
+  // 若所有球都已发完，next 指向任意；判断是否还有未发射的
+  const hasLeft = ballPool.some((_,i)=>!used[i]);
+  if(hasLeft){ curBall = firstUnused(); state = ST.AIM; }
+  else { state = ST.PLAY; settleTimer = 1.2; }
+}
+function reflect(vx,vy,nx,ny){
+  const dot = vx*nx+vy*ny;
+  return [vx-2*dot*nx, vy-2*dot*ny];
+}
+function killFish(f, idx, killer){
+  money += f.money + moneyTalent;
+  SFX.kill();
+  if(killer && killer.effect===9){ SFX.coin(); }
+  floats.push({x:f.x, y:f.y, txt:"+"+(f.money+moneyTalent), life:1, color:"#ffd54f"});
+  if(killer && killer.effect===9){ // 幸运球：额外+20
+    money += 20;
+    floats.push({x:f.x, y:f.y-30, txt:"+20 幸运", life:1.1, color:"#ffe57f"});
+  }
+  for(let i=0;i<14;i++) particles.push({x:f.x,y:f.y,vx:(Math.random()-.5)*260,vy:(Math.random()-.5)*260,life:.6+Math.random()*.4,c:fishesColor(f.id),r:3+Math.random()*5});
+  fishes.splice(idx,1);
+  screenShake = Math.max(screenShake, 6);
+}
+function fishesColor(id){
+  const hue = (id*37)%360; return `hsl(${hue},70%,60%)`;
+}
+function damageFish(f, idx, dmg, killer){
+  if(f.hp<=0) return;
+  let crit=false;
+  if(killer && killer.effect===10 && Math.random()<0.5){ dmg*=2; crit=true; } // 暴击球
+  let d = dmg;
+  if(f.doubleNext){ d*=2; f.doubleNext=false; f.frozen=false; }
+  f.hp -= d;
+  if(crit) SFX.crit(); else SFX.hit();
+  floats.push({x:f.x, y:f.y-f.r-10, txt:(crit?"暴击 ":"-")+Math.round(d), life:.7, color:crit?"#ff1744":"#ff8a80", small:true});
+  if(f.hp<=0){ killFish(f, idx, killer); }
+}
+function applyBallHit(ball, f, idx){
+  const atk = ball.atk;
+  // 特效触发（基于被碰撞到的这条鱼）
+  if(ball.effect===1){ // 闪电：攻击最近的另外2条鱼
+    const others = fishes.map((o,i)=>({o,i})).filter(t=>t.o!==f)
+      .sort((a,b)=>Math.hypot(a.o.x-f.x,a.o.y-f.y)-Math.hypot(b.o.x-f.x,b.o.y-f.y))
+      .slice(0,2);
+    others.forEach(t=>{
+      particles.push({x:f.x,y:f.y,vx:(t.o.x-f.x)/3,vy:(t.o.y-f.y)/3,life:.25,c:"#fff176",r:3,lightning:true});
+      damageFish(t.o, t.i, atk, ball);
+    });
+  } else if(ball.effect===2){ // 爆炸 100 范围
+    for(let i=fishes.length-1;i>=0;i--){
+      const o=fishes[i]; if(o===f) continue;
+      if(Math.hypot(o.x-f.x,o.y-f.y)<=100){
+        particles.push({x:f.x,y:f.y,vx:(o.x-f.x)/3,vy:(o.y-f.y)/3,life:.3,c:"#ff7043",r:4,lightning:true});
+        damageFish(o, i, atk, ball);
+      }
+    }
+    for(let i=0;i<20;i++) particles.push({x:f.x,y:f.y,vx:Math.cos(i/20*6.28)*200,vy:Math.sin(i/20*6.28)*200,life:.4,c:"#ffab40",r:4});
+  } else if(ball.effect===3){ // 中毒
+    f.poison = 5; f.poisonDps = atk/2;
+  } else if(ball.effect===4){ // 冰冻
+    f.frozen = true; f.doubleNext = true;
+  }
+  // 对主鱼造成伤害
+  damageFish(f, idx, atk, ball);
+}
+
+/* ============================================================
+   主更新
+   ============================================================ */
+function update(dt){
+  // 背景气泡
+  bubbles.forEach(b=>{ b.y-=b.s*dt; if(b.y< -20){ b.y=H+20; b.x=Math.random()*W; } });
+  // 浮游颗粒缓慢上浮+横向漂移
+  plankton.forEach(p=>{
+    p.y-=p.s*dt; p.ph+=dt;
+    p.x+=Math.sin(p.ph)*p.dr;
+    if(p.y<FIELD_TOP-10){ p.y=FIELD_BOT+10; p.x=Math.random()*W; }
+  });
+  // 粒子 / 飘字
+  for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt; if(p.life<=0)particles.splice(i,1); }
+  for(let i=floats.length-1;i>=0;i--){ const f=floats[i]; f.y-=50*dt; f.life-=dt*1.3; if(f.life<=0)floats.splice(i,1); }
+  if(screenShake>0) screenShake = Math.max(0, screenShake-dt*30);
+
+  if(state===ST.AIM || state===ST.PLAY){
+    // 鱼移动
+    fishes.forEach(f=>{
+      if(f.frozen) return;
+      f.wobble += dt*3;
+      f.x += f.vx*dt; f.y += f.vy*dt;
+      f.nextTurn -= dt;
+      if(f.nextTurn<=0){
+        const [tMin,tMax]=[20,30];
+        f.nextTurn = (tMin+Math.random()*(tMax-tMin))/10;
+        const cur = Math.atan2(f.vy,f.vx);
+        const delta = (Math.PI/6 + Math.random()*(Math.PI-Math.PI/6)) * (Math.random()<.5?-1:1);
+        const nAng = cur+delta;
+        const sp = Math.hypot(f.vx,f.vy);
+        f.vx = Math.cos(nAng)*sp; f.vy = Math.sin(nAng)*sp;
+      }
+      // 鱼碰墙反弹
+      if(f.x<f.r){ f.x=f.r; f.vx=Math.abs(f.vx); }
+      if(f.x>W-f.r){ f.x=W-f.r; f.vx=-Math.abs(f.vx); }
+      if(f.y<FIELD_TOP+f.r){ f.y=FIELD_TOP+f.r; f.vy=Math.abs(f.vy); }
+      if(f.y>FIELD_BOT-f.r){ f.y=FIELD_BOT-f.r; f.vy=-Math.abs(f.vy); }
+      // 鱼碰障碍反弹
+      obstacles.forEach(o=>{
+        const dx=f.x-o.x, dy=f.y-o.y, d=Math.hypot(dx,dy), min=f.r+o.r;
+        if(d<min && d>0){
+          const nx=dx/d, ny=dy/d;
+          f.x=o.x+nx*min; f.y=o.y+ny*min;
+          const [rvx,rvy]=reflect(f.vx,f.vy,nx,ny); f.vx=rvx; f.vy=rvy;
+        }
+      });
+      // 中毒 DOT
+      if(f.poison>0){
+        f.poison-=dt;
+        f._dotAcc=(f._dotAcc||0)+dt;
+        if(f._dotAcc>=1){
+          f._dotAcc-=1;
+          f.hp-=f.poisonDps;
+          floats.push({x:f.x,y:f.y-f.r-10,txt:"-"+Math.round(f.poisonDps),life:.6,color:"#9ccc65",small:true});
+        }
+      }
+    });
+    // 处理中毒/持续伤害死亡的鱼
+    for(let i=fishes.length-1;i>=0;i--){
+      if(fishes[i].hp<=0){ killFish(fishes[i], i, null); }
+    }
+    // 球移动与碰撞
+    for(let i=balls.length-1;i>=0;i--){
+      const b=balls[i];
+      b.trail.push({x:b.x,y:b.y}); if(b.trail.length>12)b.trail.shift();
+      b.x+=b.vx*dt; b.y+=b.vy*dt;
+      // 边界
+      if(b.x<b.r){ b.x=b.r; b.vx=Math.abs(b.vx); b.rebound--; onBounce(b); }
+      if(b.x>W-b.r){ b.x=W-b.r; b.vx=-Math.abs(b.vx); b.rebound--; onBounce(b); }
+      if(b.y<FIELD_TOP+b.r){ b.y=FIELD_TOP+b.r; b.vy=Math.abs(b.vy); b.rebound--; onBounce(b); }
+      if(b.y>FIELD_BOT-b.r){ b.y=FIELD_BOT-b.r; b.vy=-Math.abs(b.vy); b.rebound--; onBounce(b); }
+      // 障碍
+      obstacles.forEach(o=>{
+        const dx=b.x-o.x, dy=b.y-o.y, d=Math.hypot(dx,dy), min=b.r+o.r;
+        if(d<min && d>0){
+          const nx=dx/d, ny=dy/d;
+          b.x=o.x+nx*min; b.y=o.y+ny*min;
+          const [rvx,rvy]=reflect(b.vx,b.vy,nx,ny); b.vx=rvx; b.vy=rvy;
+          if(b.effect!==7) b.rebound--; // 避障球：碰障碍不消耗次数
+          onBounce(b);
+        }
+      });
+      // 鱼
+      for(let fi=fishes.length-1; fi>=0; fi--){
+        const f=fishes[fi];
+        const dx=b.x-f.x, dy=b.y-f.y, d=Math.hypot(dx,dy), min=b.r+f.r;
+        if(d<min){
+          applyBallHit(b, f, fi);
+          if(b.effect===5){
+            // 穿透球：碰鱼不反弹，但仍消耗弹射次数
+            b.rebound--;
+            // 沿穿透方向略微推开避免连续触发同一帧
+            const nx=dx/(d||1), ny=dy/(d||1);
+            b.x=f.x+nx*min; b.y=f.y+ny*min;
+          } else {
+            const nx=dx/(d||1), ny=dy/(d||1);
+            b.x=f.x+nx*min; b.y=f.y+ny*min;
+            const [rvx,rvy]=reflect(b.vx,b.vy,nx,ny); b.vx=rvx; b.vy=rvy;
+            b.rebound--; onBounce(b);
+          }
+          break; // 一帧只处理一条鱼
+        }
+      }
+      if(b.rebound<=0){
+        // 分裂球：次数耗尽时向间隔120度的3个方向各发射一个基础球
+        if(b.effect===8){
+          const base = effBall(1);
+          const baseAng = Math.random()*Math.PI*2;
+          for(let k=0;k<3;k++){
+            const a = baseAng + k*(Math.PI*2/3);
+            spawnBall(b.x, b.y, Math.cos(a), Math.sin(a), base);
+          }
+          SFX.split();
+          for(let k=0;k<16;k++) particles.push({x:b.x,y:b.y,vx:Math.cos(k/16*6.28)*200,vy:Math.sin(k/16*6.28)*200,life:.5,c:b.glow,r:3});
+        } else {
+          for(let k=0;k<10;k++) particles.push({x:b.x,y:b.y,vx:(Math.random()-.5)*180,vy:(Math.random()-.5)*180,life:.4,c:b.glow,r:3});
+        }
+        balls.splice(i,1);
+      }
+    }
+    // 鱼全部消灭 → 立刻结算（回收剩余球）
+    if((state===ST.AIM||state===ST.PLAY) && fishes.length===0){
+      const unused = ballPool.filter((_,i)=>!used[i]).length;
+      if(unused>0){
+        recycleBonus = unused*50;
+        money += recycleBonus;
+      } else {
+        recycleBonus = 0;
+      }
+      showSettle();
+    }
+  }
+}
+function onBounce(b){
+  SFX.bounce();
+  particles.push({x:b.x,y:b.y,vx:(Math.random()-.5)*80,vy:(Math.random()-.5)*80,life:.25,c:b.glow,r:2});
+}
+
+/* ============================================================
+   结算 / 奖励
+   ============================================================ */
+function showSettle(){
+  const target = LEVELS[levelIdx].target;
+  if(money >= target){
+    state = ST.REWARD;
+    rewardPicks = rollRewards();
+    SFX.reward();
+  } else {
+    state = ST.OVER;
+    SFX.lose();
+    earnExp();
+  }
+}
+let lastEarnedExp=0;
+function earnExp(){
+  // 每通过1小关=1经验；通过关数=levelIdx（0-based）
+  const earned = levelIdx;
+  lastEarnedExp = earned;
+  if(earned>0){
+    totalExp += earned;
+    saveSave();
+  }
+}
+function rollRewards(){
+  const L = LEVELS[levelIdx];
+  const bp = parseWeight(L.ball).map(x=>({type:"ball", id:x.id, w:x.w}));
+  const ep = parseWeight(L.eff).map(x=>({type:"eff", id:x.id, w:x.w}));
+  const pool = bp.concat(ep);
+  const picks=[];
+  for(let k=0;k<3;k++){
+    const total = pool.reduce((s,p)=>s+p.w,0);
+    let r = Math.random()*total, chosen=null;
+    for(let i=0;i<pool.length;i++){ r-=pool[i].w; if(r<=0){ chosen=i; break; } }
+    if(chosen===null) chosen=pool.length-1;
+    picks.push(pool.splice(chosen,1)[0]);
+  }
+  return picks;
+}
+function applyPick(p){
+  SFX.reward();
+  if(p.type==="ball"){ ballPool.push(p.id); }
+  else { const e=EFFECTS[p.id]; gBonus.atk+=e.atk; gBonus.rebound+=e.rebound; gBonus.speed+=e.speed; }
+  levelIdx++;
+  if(levelIdx>=LEVELS.length){ state=ST.WIN; SFX.win(); earnExp(); return; }
+  startLevel(); state=ST.AIM;
+}
+
+/* ============================================================
+   输入
+   ============================================================ */
+function toLogic(cx,cy){
+  const rect = canvas.getBoundingClientRect();
+  return { x:(cx-rect.left)/rect.width*W, y:(cy-rect.top)/rect.height*H };
+}
+let pressing=false;
+canvas.addEventListener('pointerdown', e=>{
+  const p=toLogic(e.clientX,e.clientY);
+  // 静音开关（任何状态都能点）
+  if(Math.hypot(p.x-MUTE_BTN.x, p.y-MUTE_BTN.y) < MUTE_BTN.r+8){
+    sfxOn=!sfxOn; bgmOn=sfxOn;
+    if(!sfxOn) stopBGM();
+    return;
+  }
+  if(state===ST.MENU){
+    // 开始按钮
+    if(p.y>1380 && p.y<1530 && p.x>W/2-220 && p.x<W/2+220){ restartGame(); return; }
+    // 天赋按钮
+    if(p.y>1580 && p.y<1710 && p.x>W/2-220 && p.x<W/2+220){
+      state=ST.TALENT;
+      talentScroll = TALENT_STEP*100 - 1650; // 自动定位到最底部起点
+      return;
+    }
+    return;
+  }
+  if(state===ST.TALENT){
+    // 返回按钮
+    if(p.x>TALENT_BACK_BTN.x && p.x<TALENT_BACK_BTN.x+TALENT_BACK_BTN.w &&
+       p.y>TALENT_BACK_BTN.y && p.y<TALENT_BACK_BTN.y+TALENT_BACK_BTN.h){
+      state=ST.MENU; return;
+    }
+    // 解锁按钮
+    if(talentUnlocked<TALENTS.length &&
+       p.x>TALENT_UNLOCK_BTN.x && p.x<TALENT_UNLOCK_BTN.x+TALENT_UNLOCK_BTN.w &&
+       p.y>TALENT_UNLOCK_BTN.y && p.y<TALENT_UNLOCK_BTN.y+TALENT_UNLOCK_BTN.h){
+      const next=TALENTS[talentUnlocked];
+      if(totalExp>=next.exp){ totalExp-=next.exp; talentUnlocked++; saveSave(); SFX.reward(); }
+      return;
+    }
+    // 记录拖动起点
+    talentDrag = { x:p.x, y:p.y, scroll:talentScroll, moved:false };
+    return;
+  }
+  if(state===ST.OVER || state===ST.WIN){
+    // 重新开始
+    if(p.y>1450 && p.y<1580 && p.x>W/2-220 && p.x<W/2+220){ restartGame(); }
+    // 回到主菜单
+    if(p.y>1620 && p.y<1750 && p.x>W/2-220 && p.x<W/2+220){ state=ST.MENU; stopBGM(); }
+    return;
+  }
+  if(state===ST.REWARD){
+    // 三张卡片
+    for(let i=0;i<3;i++){
+      const cy = 520+i*420;
+      if(p.x>80 && p.x<W-80 && p.y>cy-170 && p.y<cy+170){ applyPick(rewardPicks[i]); break; }
+    }
+    return;
+  }
+  if(state===ST.AIM){
+    // 右下角左右切换球按钮
+    if(Math.hypot(p.x-SWAP_LEFT.x, p.y-SWAP_LEFT.y) < SWAP_LEFT.r+12){ swapBall(-1); return; }
+    if(Math.hypot(p.x-SWAP_RIGHT.x, p.y-SWAP_RIGHT.y) < SWAP_RIGHT.r+12){ swapBall(1); return; }
+    pressing=true; aim=p; canvas.setPointerCapture(e.pointerId);
+  }
+});
+canvas.addEventListener('pointermove', e=>{
+  if(pressing && state===ST.AIM) aim=toLogic(e.clientX,e.clientY);
+  if(state===ST.TALENT && talentDrag){
+    const p=toLogic(e.clientX,e.clientY);
+    const dy = p.y - talentDrag.y;
+    if(Math.abs(dy)>8) talentDrag.moved=true;
+    if(talentDrag.moved){
+      talentScroll = talentDrag.scroll - dy;
+      if(talentScroll<0) talentScroll=0;
+      if(talentScroll>TALENT_MAX_SCROLL) talentScroll=TALENT_MAX_SCROLL;
+    }
+  }
+});
+canvas.addEventListener('pointerup', e=>{
+  if(pressing && state===ST.AIM && aim){
+    // 防止朝发射点发射
+    if(Math.hypot(aim.x-LAUNCH.x, aim.y-LAUNCH.y)>60) launchBall(aim.x, aim.y);
+  }
+  pressing=false;
+  talentDrag=null;
+});
+function restartGame(){
+  ac(); startBGM();
+  const tb=talentBonus();
+  levelIdx=0; ballPool=[1,1,1,1]; gBonus={atk:tb.atk, rebound:tb.rebound, speed:tb.speed}; moneyTalent=tb.money; money=0;
+  startLevel(); state=ST.AIM;
+}
+
+/* ============================================================
+   绘制
+   ============================================================ */
+function drawBackground(){
+  // 1. 电影级垂直渐变：表层青 → 中层蓝 → 深渊墨蓝
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#1b6fae");
+  g.addColorStop(0.18,"#125a96");
+  g.addColorStop(0.45,"#0b3d70");
+  g.addColorStop(0.75,"#062549");
+  g.addColorStop(1,"#020d24");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  const t = performance.now()/1000;
+
+  // 2. 丁达尔光柱（god rays）：从水面斜射，随时间轻微摆动
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for(let i=0;i<6;i++){
+    const bx = ((i/6)*W + Math.sin(t*0.25+i*1.7)*90 + W)%(W+400)-200;
+    const sway = Math.sin(t*0.4+i)*30;
+    const topW = 60+Math.sin(t*0.6+i*2)*30;
+    const grad = ctx.createLinearGradient(0,0,0,FIELD_BOT);
+    grad.addColorStop(0,"rgba(160,225,255,0.20)");
+    grad.addColorStop(0.6,"rgba(120,200,255,0.06)");
+    grad.addColorStop(1,"rgba(120,200,255,0)");
+    ctx.fillStyle=grad;
+    ctx.beginPath();
+    ctx.moveTo(bx-topW/2, 0);
+    ctx.lineTo(bx+topW/2, 0);
+    ctx.lineTo(bx+topW/2+180+sway, FIELD_BOT);
+    ctx.lineTo(bx-topW/2+80+sway, FIELD_BOT);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // 3. 海床剪影（底部沙丘 + 珊瑚/海草）
+  ctx.save();
+  // 沙丘
+  ctx.fillStyle="#041a36";
+  ctx.beginPath();
+  ctx.moveTo(0, FIELD_BOT);
+  for(let x=0;x<=W;x+=40){
+    const y = FIELD_BOT - 40 - Math.sin(x*0.012)*30 - Math.sin(x*0.03)*12;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, FIELD_BOT); ctx.closePath(); ctx.fill();
+  // 珊瑚/海草剪影（固定位置，轻微摇摆）
+  ctx.fillStyle="rgba(6,35,66,0.9)";
+  for(let i=0;i<9;i++){
+    const cx = (i*137+80)%W;
+    const baseY = FIELD_BOT - 20 - Math.sin(cx*0.012)*30;
+    const h = 60+((i*53)%90);
+    const sway = Math.sin(t*1.2+i)*6;
+    ctx.beginPath();
+    ctx.moveTo(cx-10, baseY);
+    ctx.quadraticCurveTo(cx-10+sway, baseY-h*0.6, cx+sway, baseY-h);
+    ctx.quadraticCurveTo(cx+10+sway, baseY-h*0.6, cx+10, baseY);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // 4. 浮游颗粒（marine snow）
+  ctx.fillStyle="rgba(200,235,255,0.35)";
+  plankton.forEach(p=>{
+    ctx.globalAlpha = 0.15 + 0.25*Math.abs(Math.sin(p.ph));
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.28); ctx.fill();
+  });
+  ctx.globalAlpha=1;
+
+  // 5. 气泡
+  ctx.strokeStyle="rgba(180,225,255,.22)";
+  bubbles.forEach(b=>{ ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.stroke(); });
+
+  // 6. 暗角 vignette
+  const vg = ctx.createRadialGradient(W/2,H/2, H*0.3, W/2,H/2, H*0.75);
+  vg.addColorStop(0,"rgba(0,0,0,0)");
+  vg.addColorStop(1,"rgba(0,5,20,0.55)");
+  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+}
+function drawFish(f){
+  ctx.save(); ctx.translate(f.x,f.y);
+  const hue=(f.id*37)%360;
+  const r=f.r;
+  // 鱼头朝向移动方向 + 游动摆动
+  const ang = Math.atan2(f.vy, f.vx);
+  const wob = Math.sin(f.wobble)*0.12;
+  ctx.rotate(ang + wob);
+  const kind = (f.id-1)%12;
+  if(kind===7){ // 章鱼
+    const grad=ctx.createRadialGradient(0,-r*0.3, r*0.2, 0,0, r*0.9);
+    grad.addColorStop(0,`hsl(${hue},80%,75%)`);
+    grad.addColorStop(1,`hsl(${hue},65%,48%)`);
+    ctx.fillStyle=grad;
+    ctx.beginPath(); ctx.arc(0,-r*0.2, r*0.72, Math.PI, 0); ctx.lineTo(r*0.72,-r*0.1); ctx.quadraticCurveTo(0,r*0.15,-r*0.72,-r*0.1); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=`hsl(${hue},60%,45%)`; ctx.lineWidth=r*0.16; ctx.lineCap="round";
+    for(let i=0;i<6;i++){ const a=-Math.PI/2+(i-2.5)*0.4;
+      const sw=Math.sin(f.wobble*2+i)*r*0.12;
+      ctx.beginPath(); ctx.moveTo(Math.cos(a)*r*0.5,-r*0.15+Math.sin(a)*r*0.4);
+      ctx.quadraticCurveTo(Math.cos(a)*r*0.9+sw, r*0.35, Math.cos(a)*r*1.15+sw, r*0.65);
+      ctx.stroke(); }
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(-r*0.2,-r*0.25,r*0.13,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(-r*0.22,-r*0.25,r*0.07,0,6.28); ctx.fill();
+  } else if(kind===9){ // 螃蟹
+    const grad=ctx.createLinearGradient(0,-r,0,r);
+    grad.addColorStop(0,`hsl(${hue},75%,65%)`); grad.addColorStop(1,`hsl(${hue},65%,42%)`);
+    ctx.fillStyle=grad;
+    ctx.beginPath(); ctx.ellipse(0,0,r*0.8,r*0.55,0,0,6.28); ctx.fill();
+    ctx.fillStyle=`hsl(${hue},60%,40%)`;
+    [-1,1].forEach(s=>{
+      ctx.beginPath(); ctx.arc(s*r*0.95,-r*0.25,r*0.28,0,6.28); ctx.fill();
+      ctx.strokeStyle=`hsl(${hue},60%,40%)`; ctx.lineWidth=r*0.1;
+      ctx.beginPath(); ctx.moveTo(s*r*0.6,r*0.2); ctx.lineTo(s*r*0.95,r*0.45); ctx.stroke();
+    });
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.1,-r*0.2,r*0.1,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.13,-r*0.2,r*0.05,0,6.28); ctx.fill();
+  } else if(kind===11){ // 乌龟
+    ctx.fillStyle=`hsl(${hue},55%,38%)`;
+    ctx.beginPath(); ctx.ellipse(0,0,r*0.85,r*0.6,0,0,6.28); ctx.fill();
+    const grad=ctx.createRadialGradient(0,-r*0.2,10,0,0,r);
+    grad.addColorStop(0,`hsl(${hue},70%,58%)`); grad.addColorStop(1,`hsl(${hue},60%,38%)`);
+    ctx.fillStyle=grad;
+    ctx.beginPath(); ctx.ellipse(0,0,r*0.7,r*0.48,0,0,6.28); ctx.fill();
+    ctx.strokeStyle=`hsla(${hue},40%,25%,0.6)`; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.ellipse(0,0,r*0.45,r*0.3,0,0,6.28); ctx.stroke();
+    ctx.fillStyle=`hsl(${hue},70%,55%)`;
+    ctx.beginPath(); ctx.arc(r*0.92,0,r*0.28,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*1.0,r*0.02,r*0.06,0,6.28); ctx.fill();
+  } else if(kind===5){ // 海星
+    ctx.fillStyle=`hsl(${hue},80%,65%)`;
+    ctx.beginPath();
+    for(let i=0;i<10;i++){
+      const a=i*Math.PI/5 - Math.PI/2;
+      const rr=i%2===0?r*1.1:r*0.45;
+      const px=Math.cos(a)*rr, py=Math.sin(a)*rr;
+      i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle=`hsla(${hue},60%,40%,0.5)`;
+    ctx.beginPath(); ctx.arc(0,0,r*0.3,0,6.28); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.2,-r*0.1,r*0.08,0,6.28); ctx.fill();
+  } else if(kind===6){ // 海马
+    ctx.strokeStyle=`hsl(${hue},70%,55%)`; ctx.lineWidth=r*0.18; ctx.lineCap="round";
+    ctx.fillStyle=`hsl(${hue},75%,60%)`;
+    // 身体
+    ctx.beginPath(); ctx.ellipse(-r*0.1,0,r*0.55,r*0.7,0,0,6.28); ctx.fill();
+    // 头
+    ctx.beginPath(); ctx.arc(r*0.35,-r*0.55,r*0.32,0,6.28); ctx.fill();
+    // 卷曲尾巴
+    ctx.strokeStyle=`hsl(${hue},70%,55%)`; ctx.lineWidth=r*0.15;
+    ctx.beginPath(); ctx.arc(-r*0.4,r*0.75,r*0.35,Math.PI*0.5,Math.PI*1.8); ctx.stroke();
+    // 背鳍
+    ctx.fillStyle=`hsl(${hue},65%,50%)`;
+    ctx.beginPath(); ctx.moveTo(-r*0.3,-r*0.6); ctx.quadraticCurveTo(-r*0.7,-r*0.3,-r*0.3,r*0.1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.4,-r*0.6,r*0.08,0,6.28); ctx.fill();
+  } else if(kind===8){ // 虾
+    const sw=Math.sin(f.wobble*3)*0.15;
+    ctx.fillStyle=`hsl(${hue},80%,65%)`;
+    // 弯曲身体
+    ctx.beginPath();
+    ctx.moveTo(r*0.8,0);
+    ctx.quadraticCurveTo(0,-r*0.3, -r*0.3,0);
+    ctx.quadraticCurveTo(-r*0.6,r*0.2, -r*0.9,r*0.1+sw);
+    ctx.quadraticCurveTo(-r*0.5,r*0.5, -r*0.2,r*0.4);
+    ctx.quadraticCurveTo(r*0.1,r*0.3, r*0.8,0);
+    ctx.closePath(); ctx.fill();
+    // 扇尾
+    ctx.fillStyle=`hsl(${hue},70%,55%)`;
+    ctx.beginPath(); ctx.moveTo(-r*0.8,r*0.1+sw); ctx.lineTo(-r*1.1,-r*0.2+sw); ctx.lineTo(-r*1.1,r*0.4+sw); ctx.closePath(); ctx.fill();
+    // 眼睛
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.6,-r*0.08,r*0.1,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.62,-r*0.08,r*0.05,0,6.28); ctx.fill();
+  } else if(kind===10){ // 乌贼
+    const grad=ctx.createLinearGradient(0,-r,0,r);
+    grad.addColorStop(0,`hsl(${hue},75%,70%)`); grad.addColorStop(1,`hsl(${hue},65%,45%)`);
+    ctx.fillStyle=grad;
+    // 长锥形身体
+    ctx.beginPath();
+    ctx.moveTo(r*0.9,0);
+    ctx.quadraticCurveTo(r*0.5,-r*0.4, -r*0.3,-r*0.25);
+    ctx.lineTo(-r*0.5,0);
+    ctx.quadraticCurveTo(-r*0.3,r*0.25, r*0.5,r*0.4);
+    ctx.closePath(); ctx.fill();
+    // 触手
+    ctx.strokeStyle=`hsl(${hue},60%,50%)`; ctx.lineWidth=r*0.1; ctx.lineCap="round";
+    for(let i=0;i<5;i++){
+      const off=(i-2)*r*0.12;
+      const sw=Math.sin(f.wobble*2+i)*r*0.1;
+      ctx.beginPath(); ctx.moveTo(-r*0.4,off);
+      ctx.quadraticCurveTo(-r*0.7,off+sw, -r*0.95,off+sw*1.5);
+      ctx.stroke();
+    }
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.55,-r*0.08,r*0.1,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.58,-r*0.08,r*0.05,0,6.28); ctx.fill();
+  } else if(kind===2){ // 鲨鱼
+    const grad=ctx.createLinearGradient(0,-r,0,r);
+    grad.addColorStop(0,`hsl(210,45%,70%)`); grad.addColorStop(1,`hsl(210,35%,45%)`);
+    ctx.fillStyle=grad;
+    ctx.beginPath(); ctx.ellipse(0,0,r,r*0.5,0,0,6.28); ctx.fill();
+    // 背鳍
+    ctx.fillStyle=`hsl(210,35%,40%)`;
+    ctx.beginPath(); ctx.moveTo(-r*0.2,-r*0.4); ctx.quadraticCurveTo(0,-r*0.95, r*0.3,-r*0.4); ctx.closePath(); ctx.fill();
+    // 大尾鳍
+    const sw=Math.sin(f.wobble*2.5)*0.25;
+    ctx.save(); ctx.translate(-r*0.8,0); ctx.rotate(sw);
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-r*0.6,-r*0.55); ctx.lineTo(-r*0.4,0); ctx.lineTo(-r*0.6,r*0.55); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // 白色肚皮
+    ctx.fillStyle="rgba(255,255,255,.6)";
+    ctx.beginPath(); ctx.ellipse(0,r*0.15,r*0.8,r*0.3,0,0,Math.PI); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.55,-r*0.1,r*0.07,0,6.28); ctx.fill();
+  } else if(kind===3){ // 飞鱼
+    ctx.fillStyle=`hsl(${hue},70%,60%)`;
+    ctx.beginPath(); ctx.ellipse(0,0,r*0.7,r*0.35,0,0,6.28); ctx.fill();
+    // 宽胸鳍
+    const fl=Math.sin(f.wobble*2)*0.1;
+    ctx.fillStyle=`hsl(${hue},65%,55%)`;
+    [-1,1].forEach(s=>{
+      ctx.save(); ctx.rotate(s*fl);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.quadraticCurveTo(s*r*0.6,-r*0.7*s, s*r*1.1,-r*0.4*s); ctx.quadraticCurveTo(s*r*0.7,0, s*r*0.5,r*0.2*s); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    });
+    const sw=Math.sin(f.wobble*2.5)*0.2;
+    ctx.save(); ctx.translate(-r*0.6,0); ctx.rotate(sw);
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-r*0.4,-r*0.3); ctx.lineTo(-r*0.4,r*0.3); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.4,-r*0.05,r*0.08,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.42,-r*0.05,r*0.04,0,6.28); ctx.fill();
+  } else if(kind===4){ // 天使鱼
+    ctx.fillStyle=`hsl(${hue},75%,65%)`;
+    ctx.beginPath();
+    ctx.moveTo(r*0.9,0);
+    ctx.lineTo(0,-r*0.8);
+    ctx.lineTo(-r*0.6,0);
+    ctx.lineTo(0,r*0.8);
+    ctx.closePath(); ctx.fill();
+    // 长背鳍
+    ctx.fillStyle=`hsl(${hue},65%,55%)`;
+    ctx.beginPath(); ctx.moveTo(-r*0.1,-r*0.6); ctx.lineTo(-r*0.3,-r*1.1); ctx.lineTo(r*0.1,-r*0.6); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-r*0.1,r*0.6); ctx.lineTo(-r*0.3,r*1.1); ctx.lineTo(r*0.1,r*0.6); ctx.closePath(); ctx.fill();
+    // 条纹
+    ctx.fillStyle=`hsla(${hue},50%,35%,0.5)`;
+    [-0.2,0.1,0.4].forEach(sx=>{ ctx.beginPath(); ctx.ellipse(r*sx,0,r*0.08,r*0.7,0,0,6.28); ctx.fill(); });
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.5,-r*0.1,r*0.1,0,6.28); ctx.fill();
+  } else if(kind===1){ // 小丑鱼
+    const tailSwing = Math.sin(f.wobble*2.5)*0.28;
+    ctx.save(); ctx.translate(-r*0.85,0); ctx.rotate(tailSwing);
+    ctx.fillStyle="#ff7f27";
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.quadraticCurveTo(-r*0.45,-r*0.6,-r*0.8,-r*0.5);
+    ctx.quadraticCurveTo(-r*0.6,-r*0.1,-r*0.6,0); ctx.quadraticCurveTo(-r*0.6,r*0.1,-r*0.8,r*0.5);
+    ctx.quadraticCurveTo(-r*0.45,r*0.6,0,0); ctx.fill(); ctx.restore();
+    const bg=ctx.createLinearGradient(0,-r,0,r);
+    bg.addColorStop(0,"#ff9933"); bg.addColorStop(1,"#ff6600");
+    ctx.fillStyle=bg;
+    ctx.beginPath(); ctx.ellipse(0,0,r,r*0.6,0,0,6.28); ctx.fill();
+    // 白色条纹
+    ctx.fillStyle="#fff";
+    [-0.3,0.15].forEach(sx=>{ ctx.beginPath(); ctx.ellipse(r*sx,0,r*0.12,r*0.55,0,0,6.28); ctx.fill(); });
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.42,-r*0.12,r*0.1,0,6.28); ctx.fill();
+  } else { // 普通鱼
+    const tailSwing = Math.sin(f.wobble*2.5)*0.28;
+    ctx.save();
+    ctx.translate(-r*0.85,0); ctx.rotate(tailSwing);
+    ctx.fillStyle=`hsl(${hue},62%,45%)`;
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.quadraticCurveTo(-r*0.45,-r*0.6, -r*0.8,-r*0.5);
+    ctx.quadraticCurveTo(-r*0.6,-r*0.1, -r*0.6,0);
+    ctx.quadraticCurveTo(-r*0.6,r*0.1, -r*0.8,r*0.5);
+    ctx.quadraticCurveTo(-r*0.45,r*0.6, 0,0);
+    ctx.fill();
+    ctx.restore();
+    const bg=ctx.createLinearGradient(0,-r,0,r);
+    bg.addColorStop(0,`hsl(${hue},82%,74%)`);
+    bg.addColorStop(0.5,`hsl(${hue},72%,58%)`);
+    bg.addColorStop(1,`hsl(${hue},60%,40%)`);
+    ctx.fillStyle=bg;
+    ctx.beginPath(); ctx.ellipse(0,0,r,r*0.62,0,0,6.28); ctx.fill();
+    ctx.fillStyle=`hsl(${hue},62%,42%)`;
+    ctx.beginPath();
+    ctx.moveTo(-r*0.35,-r*0.5);
+    ctx.quadraticCurveTo(-r*0.05,-r*0.95, r*0.25,-r*0.48);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(r*0.05,r*0.35);
+    ctx.quadraticCurveTo(r*0.25,r*0.78, r*0.4,r*0.5);
+    ctx.closePath(); ctx.fill();
+    if(f.id%3===0){
+      ctx.fillStyle=`hsla(${hue},50%,32%,0.45)`;
+      for(let s=-1;s<=1;s++){ ctx.beginPath();
+        ctx.ellipse(s*r*0.28,0,r*0.11,r*0.52,0,0,6.28); ctx.fill(); }
+    } else if(f.id%3===1){
+      ctx.fillStyle=`hsla(${hue},45%,28%,0.5)`;
+      [[-r*0.3,-r*0.15],[r*0.1,r*0.2],[-r*0.05,r*0.3]].forEach(([sx,sy])=>{
+        ctx.beginPath(); ctx.arc(sx,sy,r*0.1,0,6.28); ctx.fill(); });
+    }
+    ctx.fillStyle="rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.ellipse(r*0.1,-r*0.32,r*0.42,r*0.16,0,0,6.28); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.42,-r*0.12,r*0.17,0,6.28); ctx.fill();
+    ctx.fillStyle="#1a1a2e"; ctx.beginPath(); ctx.arc(r*0.46,-r*0.12,r*0.09,0,6.28); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(r*0.49,-r*0.16,r*0.035,0,6.28); ctx.fill();
+  }
+  // 状态效果
+  if(f.poison>0){ ctx.fillStyle="rgba(120,200,60,.35)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.1,0,6.28); ctx.fill(); }
+  if(f.frozen){ ctx.fillStyle="rgba(150,230,255,.5)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.05,0,6.28); ctx.fill(); }
+  ctx.restore();
+  // 血条
+  const bw=f.r*2, bh=8, bx=f.x-bw/2, by=f.y-f.r-22;
+  ctx.fillStyle="rgba(0,0,0,.5)"; ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle = f.hp/f.maxHp>0.4?"#69f0ae":"#ff5252";
+  ctx.fillRect(bx,by,bw*Math.max(0,f.hp/f.maxHp),bh);
+  // 金钱奖励标注
+  ctx.fillStyle="#ffd54f"; ctx.font="bold 22px sans-serif"; ctx.textAlign="center";
+  ctx.fillText("$"+f.money, f.x, by+bh+20);
+}
+function drawBall(b){
+  // 拖尾
+  for(let i=0;i<b.trail.length;i++){
+    const t=b.trail[i], a=i/b.trail.length;
+    ctx.fillStyle=b.glow; ctx.globalAlpha=a*0.35;
+    ctx.beginPath(); ctx.arc(t.x,t.y,b.r*a,0,6.28); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  ctx.shadowColor=b.glow; ctx.shadowBlur=20;
+  ctx.fillStyle=b.color; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle="rgba(255,255,255,.7)";
+  ctx.beginPath(); ctx.arc(b.x-b.r*0.3,b.y-b.r*0.3,b.r*0.3,0,6.28); ctx.fill();
+  // 剩余弹射次数
+  ctx.fillStyle="#fff"; ctx.font="bold 18px sans-serif"; ctx.textAlign="center";
+  ctx.fillText(b.rebound, b.x, b.y+6);
+}
+function drawObstacle(o){
+  const r=o.r, t=performance.now()/1000;
+  if(o.kind===0){ // 礁石：不规则岩石
+    ctx.fillStyle="#3d4f66";
+    ctx.beginPath();
+    const pts=8;
+    for(let i=0;i<=pts;i++){
+      const a=i/pts*Math.PI*2;
+      const rr=r*(0.82+0.16*Math.abs(Math.sin(i*3.3+o.seed)));
+      const px=o.x+Math.cos(a)*rr, py=o.y+Math.sin(a)*rr*0.92;
+      i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle="rgba(255,255,255,0.14)";
+    ctx.beginPath(); ctx.ellipse(o.x-r*0.18,o.y-r*0.28,r*0.42,r*0.2,-0.4,0,6.28); ctx.fill();
+  } else if(o.kind===1){ // 枝珊瑚
+    const cols=["#ff8a80","#ffab91","#ce93d8","#90caf9","#f48fb1"];
+    ctx.strokeStyle=cols[Math.floor(o.seed)%cols.length];
+    ctx.lineCap="round";
+    for(let b=-1;b<=1;b++){
+      const bx=o.x+b*r*0.3;
+      const sway=Math.sin(t*1.4+b+o.seed)*r*0.06;
+      ctx.lineWidth=r*0.16;
+      ctx.beginPath();
+      ctx.moveTo(bx, o.y+r*0.7);
+      ctx.quadraticCurveTo(bx+sway, o.y, o.x+b*r*0.4+sway, o.y-r*0.7);
+      ctx.stroke();
+    }
+    // 顶部小珊瑚头
+    ctx.fillStyle=cols[Math.floor(o.seed)%cols.length];
+    for(let b=-1;b<=1;b++){
+      ctx.beginPath(); ctx.arc(o.x+b*r*0.4, o.y-r*0.7, r*0.12, 0, 6.28); ctx.fill();
+    }
+  } else if(o.kind===2){ // 海草簇
+    ctx.strokeStyle="#2e8b6a"; ctx.lineCap="round";
+    for(let b=-2;b<=2;b++){
+      const bx=o.x+b*r*0.22;
+      const sway=Math.sin(t*1.8+b*0.7+o.seed)*r*0.12;
+      ctx.lineWidth=r*0.1;
+      ctx.beginPath();
+      ctx.moveTo(bx, o.y+r*0.7);
+      ctx.quadraticCurveTo(bx+sway, o.y-r*0.1, bx+b*r*0.12+sway, o.y-r*0.75);
+      ctx.stroke();
+    }
+  } else { // 圆石 + 贝壳
+    ctx.fillStyle="#546e7a";
+    ctx.beginPath(); ctx.arc(o.x, o.y, r*0.82, 0, 6.28); ctx.fill();
+    ctx.fillStyle="rgba(255,255,255,0.1)";
+    ctx.beginPath(); ctx.arc(o.x-r*0.2,o.y-r*0.25,r*0.3,0,6.28); ctx.fill();
+    ctx.fillStyle="#ffe0b2";
+    ctx.beginPath(); ctx.arc(o.x+r*0.25,o.y-r*0.15,r*0.32, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle="rgba(180,120,80,.6)"; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(o.x+r*0.25,o.y-r*0.15,r*0.32, Math.PI, 0); ctx.stroke();
+  }
+}
+function drawTopUI(){
+  ctx.fillStyle="rgba(0,20,50,.7)"; ctx.fillRect(0,0,W,TOP_UI);
+  ctx.textAlign="left";
+  ctx.fillStyle="#90caf9"; ctx.font="bold 34px sans-serif";
+  const inGame = levelIdx<LEVELS.length;
+  ctx.fillText(inGame ? ("第 "+(levelIdx+1)+" 关") : "已通关", 40, 60);
+  if(inGame){
+    const target = LEVELS[levelIdx].target;
+    ctx.fillStyle="#fff"; ctx.font="bold 30px sans-serif";
+    ctx.fillText("目标: "+target, 40, 110);
+    // 金钱
+    ctx.textAlign="right";
+    ctx.fillStyle="#ffd54f"; ctx.font="bold 40px sans-serif";
+    ctx.fillText("$ "+money, W-40, 70);
+    // 进度条
+    const bw=W-80, bx=40, by=110, bh=22;
+    ctx.fillStyle="rgba(255,255,255,.15)"; ctx.fillRect(bx,by,bw,bh);
+    ctx.fillStyle="#ffd54f";
+    ctx.fillRect(bx,by,bw*Math.min(1,money/target),bh);
+    ctx.strokeStyle="rgba(255,255,255,.3)"; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
+  } else {
+    ctx.textAlign="right";
+    ctx.fillStyle="#ffd54f"; ctx.font="bold 40px sans-serif";
+    ctx.fillText("$ "+money, W-40, 70);
+  }
+  // 静音开关
+  ctx.textAlign="center";
+  ctx.font="30px sans-serif";
+  ctx.fillStyle = sfxOn ? "#80cbc4" : "#78909c";
+  ctx.fillText(sfxOn ? "♪" : "✕", W-150, 58);
+}
+const MUTE_BTN = { x: W-150, y: 45, r: 26 };
+function drawBotUI(){
+  ctx.fillStyle="rgba(0,20,50,.85)"; ctx.fillRect(0,FIELD_BOT,W,BOT_UI);
+  if(state===ST.AIM || state===ST.PLAY){
+    ctx.textAlign="left";
+    const hasLeft = ballPool.some((_,i)=>!used[i]);
+    if(hasLeft && curBall < ballPool.length){
+      const d = effBall(ballPool[curBall]);
+      ctx.fillStyle=d.color; ctx.font="bold 40px sans-serif";
+      ctx.fillText("当前弹球: "+d.name, 50, FIELD_BOT+70);
+      ctx.fillStyle="#e0e0e0"; ctx.font="28px sans-serif";
+      ctx.fillText("攻击 "+d.atk+"   速度 "+d.speed+"   弹射 "+d.rebound, 50, FIELD_BOT+120);
+      if(d.effect>0){
+        const effNames=["","闪电链","范围爆炸","中毒DOT","冰冻减速","穿透","双子","避障","分裂","幸运","暴击"];
+        ctx.fillStyle="#b39ddb";
+        ctx.fillText("特效: "+effNames[d.effect], 50, FIELD_BOT+165);
+      }
+    } else {
+      ctx.fillStyle="#90caf9"; ctx.font="bold 40px sans-serif";
+      ctx.fillText("所有弹球已发射", 50, FIELD_BOT+70);
+      ctx.fillStyle="rgba(255,255,255,.6)"; ctx.font="28px sans-serif";
+      ctx.fillText("弹球飞行中，等待结算...", 50, FIELD_BOT+120);
+    }
+    // 剩余未发射球数
+    const leftCount = ballPool.filter((_,i)=>!used[i]).length;
+    ctx.fillStyle="#90caf9"; ctx.font="28px sans-serif";
+    ctx.fillText("剩余弹球: "+leftCount, 50, FIELD_BOT+210);
+    // 全局加成
+    ctx.fillStyle="#a5d6a7";
+    ctx.fillText("加成 攻+"+gBonus.atk+" 速+"+gBonus.speed+" 弹+"+gBonus.rebound, 50, FIELD_BOT+255);
+    // 提示
+    ctx.fillStyle="rgba(255,255,255,.5)"; ctx.font="26px sans-serif";
+    ctx.fillText("拖动瞄准松开发射 · 右下角左右切换球", 50, FIELD_BOT+320);
+    // 球池缩略（未发射的球；当前选中高亮）
+    let sx=W-60;
+    for(let i=ballPool.length-1;i>=0;i--){
+      if(used[i]) continue;
+      const bd=BALLS[ballPool[i]];
+      if(i===curBall){
+        ctx.shadowColor=bd.glow; ctx.shadowBlur=18;
+        ctx.fillStyle=bd.color;
+      } else {
+        ctx.globalAlpha=0.55; ctx.fillStyle=bd.color;
+      }
+      ctx.beginPath(); ctx.arc(sx, FIELD_BOT+70, 22,0,6.28); ctx.fill();
+      ctx.shadowBlur=0; ctx.globalAlpha=1;
+      sx-=50; if(sx<60)break;
+    }
+    // 右下角换球按钮
+    // 左右切换球按钮
+    [[SWAP_LEFT,"◀"],[SWAP_RIGHT,"▶"]].forEach(([btn,arrow])=>{
+      ctx.fillStyle="rgba(30,80,150,.92)";
+      ctx.beginPath(); ctx.arc(btn.x,btn.y,btn.r,0,6.28); ctx.fill();
+      ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(btn.x,btn.y,btn.r,0,6.28); ctx.stroke();
+      ctx.fillStyle="#fff"; ctx.font="bold 36px sans-serif"; ctx.textAlign="center";
+      ctx.fillText(arrow, btn.x, btn.y+13);
+    });
+    ctx.fillStyle="rgba(255,255,255,.5)"; ctx.font="22px sans-serif";
+    ctx.fillText("切换", (SWAP_LEFT.x+SWAP_RIGHT.x)/2, SWAP_LEFT.y+SWAP_LEFT.r+32);
+  }
+}
+function drawAim(){
+  if(state!==ST.AIM) return;
+  const d = effBall(ballPool[curBall]);
+  // 拖动瞄准线
+  if(aim){
+    let dx=aim.x-LAUNCH.x, dy=aim.y-LAUNCH.y;
+    const len=Math.hypot(dx,dy)||1; dx/=len; dy/=len;
+    ctx.save();
+    ctx.setLineDash([16,14]); ctx.strokeStyle="rgba(255,255,255,.6)"; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(LAUNCH.x,LAUNCH.y);
+    ctx.lineTo(LAUNCH.x+dx*320, LAUNCH.y+dy*320); ctx.stroke();
+    ctx.restore();
+  }
+  // 常驻显示发射点的待发弹球
+  ctx.shadowColor=d.glow; ctx.shadowBlur=25;
+  ctx.fillStyle=d.color; ctx.beginPath(); ctx.arc(LAUNCH.x,LAUNCH.y,26,0,6.28); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle="rgba(255,255,255,.7)";
+  ctx.beginPath(); ctx.arc(LAUNCH.x-8,LAUNCH.y-8,8,0,6.28); ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,.5)"; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.arc(LAUNCH.x,LAUNCH.y,40,0,6.28); ctx.stroke();
+  ctx.fillStyle="rgba(255,255,255,.55)"; ctx.font="22px sans-serif"; ctx.textAlign="center";
+  ctx.fillText("发射台", LAUNCH.x, LAUNCH.y+68);
+}
+function drawParticles(){
+  particles.forEach(p=>{
+    ctx.globalAlpha=Math.max(0,p.life*2);
+    ctx.fillStyle=p.c;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.28); ctx.fill();
+  });
+  ctx.globalAlpha=1;
+  floats.forEach(f=>{
+    ctx.globalAlpha=Math.max(0,f.life);
+    ctx.fillStyle=f.color; ctx.textAlign="center";
+    ctx.font=(f.small?"bold 26px":"bold 44px")+" sans-serif";
+    ctx.fillText(f.txt,f.x,f.y);
+  });
+  ctx.globalAlpha=1;
+}
+function drawMenu(){
+  ctx.textAlign="center";
+  ctx.fillStyle="#e1f5fe"; ctx.font="bold 90px sans-serif";
+  ctx.fillText("弹球肉鸽", W/2, 600);
+  ctx.fillStyle="#80deea"; ctx.font="44px sans-serif";
+  ctx.fillText("· 深海弹射 ·", W/2, 680);
+  ctx.fillStyle="rgba(255,255,255,.7)"; ctx.font="30px sans-serif";
+  ctx.fillText("发射弹球攻击海洋生物，赚够金钱即可过关", W/2, 830);
+  ctx.fillText("过关后选择新弹球或全局加成，组建最强球池", W/2, 885);
+  // 开始按钮
+  ctx.fillStyle="#ff7043"; roundRect(W/2-220,1380,440,150,30); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
+  ctx.fillText("开始游戏", W/2, 1480);
+  // 天赋按钮
+  ctx.fillStyle="#5c6bc0"; roundRect(W/2-220,1580,440,130,30); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 46px sans-serif";
+  ctx.fillText("天赋", W/2, 1645);
+  ctx.fillStyle="rgba(255,255,255,.75)"; ctx.font="26px sans-serif";
+  ctx.fillText("经验 "+totalExp+" · 已解锁 "+talentUnlocked+"/100", W/2, 1690);
+  ctx.fillStyle="rgba(255,255,255,.45)"; ctx.font="26px sans-serif";
+  ctx.fillText("共 30 关 · 4 个原始球起步", W/2, 1830);
+}
+// ===== 天赋界面（树状节点图）=====
+const TALENT_COLOR = {1:"#ef5350", 2:"#42a5f5", 3:"#ffd54f", 4:"#ab47bc"};
+const TALENT_R = 30; // 节点半径30 = 60x60
+const TALENT_STEP = 85; // 节点间距
+function talentPos(i){
+  // i=0 最底部，i=99 最顶部；沿正弦曲线蜿蜒向上，总长可滚动
+  const t = i/99;
+  const totalH = TALENT_STEP*100; // 8500
+  const y = totalH - i*TALENT_STEP - talentScroll; // 应用滚动偏移
+  const x = 540 + Math.sin(t*Math.PI*10)*300; // 10个波峰
+  return {x,y};
+}
+const TALENT_MAX_SCROLL = TALENT_STEP*100 - 1800; // 最大滚动量
+const TALENT_UNLOCK_BTN = { x: W/2-200, y: 1850, w: 400, h: 100 };
+const TALENT_BACK_BTN = { x: W/2-180, y: 2010, w: 360, h: 80 };
+function drawTalent(){
+  ctx.textAlign="center";
+  ctx.fillStyle="rgba(0,15,40,.35)"; ctx.fillRect(0,0,W,H);
+  // 顶部固定标题
+  ctx.fillStyle="#e1f5fe"; ctx.font="bold 52px sans-serif";
+  ctx.fillText("天赋树", W/2, 90);
+  ctx.fillStyle="#ffd54f"; ctx.font="30px sans-serif";
+  ctx.fillText("经验 "+totalExp+"   已解锁 "+talentUnlocked+"/100", W/2, 140);
+  if(talentUnlocked<TALENTS.length){
+    const next=TALENTS[talentUnlocked];
+    ctx.fillStyle="#b39ddb"; ctx.font="24px sans-serif";
+    ctx.fillText("下一级："+TALENT_NAMES[next.type]+" "+TALENT_DESC[next.type]+"（需"+next.exp+"经验）", W/2, 185);
+  }
+
+  // 可视区域裁剪（只画场景区，底部按钮区不画节点）
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 220, W, 1600); // 从标题下方到按钮上方
+  ctx.clip();
+
+  const ICONS = {1:"攻",2:"速",3:"金",4:"弹"};
+  // 路径连线
+  for(let i=0;i<TALENTS.length-1;i++){
+    const a=talentPos(i), b=talentPos(i+1);
+    if(a.y<200||b.y<200||a.y>1850||b.y>1850) continue;
+    ctx.strokeStyle = i < talentUnlocked ? "rgba(129,212,250,.7)" : "rgba(255,255,255,.15)";
+    ctx.lineWidth = i < talentUnlocked ? 5 : 3;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  }
+  // 节点（每个60x60）
+  for(let i=0;i<TALENTS.length;i++){
+    const t=TALENTS[i], p=talentPos(i);
+    if(p.y<200||p.y>1850) continue; // 跳过屏幕外
+    const unlocked = i<talentUnlocked;
+    const isNext = i===talentUnlocked;
+    const color = TALENT_COLOR[t.type];
+    let r = TALENT_R;
+    if(isNext){
+      const pulse = 1+0.15*Math.sin(performance.now()/180);
+      r = TALENT_R*pulse;
+    }
+    if(unlocked){
+      ctx.shadowColor=color; ctx.shadowBlur=16;
+      ctx.fillStyle=color;
+    } else if(isNext){
+      ctx.shadowColor=color; ctx.shadowBlur=24;
+      ctx.fillStyle=color;
+    } else {
+      ctx.shadowBlur=0;
+      ctx.fillStyle="rgba(80,100,130,.5)";
+    }
+    ctx.beginPath(); ctx.arc(p.x,p.y,r,0,6.28); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.lineWidth = isNext ? 3 : 2;
+    ctx.strokeStyle = isNext ? "#fff" : "rgba(255,255,255,.4)";
+    ctx.beginPath(); ctx.arc(p.x,p.y,r,0,6.28); ctx.stroke();
+    // 图标字（24px，60x60圆内居中）
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle = unlocked||isNext ? "#fff" : "rgba(255,255,255,.5)";
+    ctx.font="bold 26px sans-serif";
+    ctx.fillText(ICONS[t.type], p.x, p.y+1);
+  }
+  ctx.restore();
+
+  // 图例（左上固定）
+  ctx.textAlign="left"; ctx.font="22px sans-serif";
+  const legends=[["#ef5350","攻 攻击"],["#42a5f5","速 速度"],["#ffd54f","金 金钱"],["#ab47bc","弹 弹射"]];
+  legends.forEach((l,i)=>{
+    ctx.fillStyle=l[0];
+    ctx.beginPath(); ctx.arc(70, 250+i*38, 10,0,6.28); ctx.fill();
+    ctx.fillStyle="rgba(255,255,255,.7)";
+    ctx.fillText(l[1], 88, 258+i*38);
+  });
+
+  // 海洋风格按钮区（底部固定）
+  ctx.textAlign="center";
+  if(talentUnlocked<TALENTS.length){
+    const t=TALENTS[talentUnlocked];
+    const canUnlock=totalExp>=t.exp;
+    ctx.fillStyle="#e1f5fe"; ctx.font="28px sans-serif";
+    ctx.fillText(TALENT_NAMES[t.type]+" "+TALENT_DESC[t.type], W/2, TALENT_UNLOCK_BTN.y-55);
+    ctx.fillStyle = canUnlock ? "#a5d6a7" : "#90a4ae";
+    ctx.font="24px sans-serif";
+    ctx.fillText("需要 "+t.exp+" 经验（当前 "+totalExp+"）", W/2, TALENT_UNLOCK_BTN.y-25);
+    // 海洋渐变按钮
+    const grad = ctx.createLinearGradient(TALENT_UNLOCK_BTN.x, TALENT_UNLOCK_BTN.y, TALENT_UNLOCK_BTN.x, TALENT_UNLOCK_BTN.y+TALENT_UNLOCK_BTN.h);
+    if(canUnlock){ grad.addColorStop(0,"#29b6f6"); grad.addColorStop(1,"#0277bd"); }
+    else { grad.addColorStop(0,"#546e7a"); grad.addColorStop(1,"#37474f"); }
+    ctx.fillStyle=grad;
+    roundRect(TALENT_UNLOCK_BTN.x, TALENT_UNLOCK_BTN.y, TALENT_UNLOCK_BTN.w, TALENT_UNLOCK_BTN.h, 28); ctx.fill();
+    ctx.strokeStyle="rgba(255,255,255,.4)"; ctx.lineWidth=2;
+    roundRect(TALENT_UNLOCK_BTN.x, TALENT_UNLOCK_BTN.y, TALENT_UNLOCK_BTN.w, TALENT_UNLOCK_BTN.h, 28); ctx.stroke();
+    ctx.fillStyle="#fff"; ctx.font="bold 42px sans-serif";
+    ctx.fillText(canUnlock ? "解锁" : "经验不足", W/2, TALENT_UNLOCK_BTN.y+66);
+  } else {
+    ctx.fillStyle="#ffd54f"; ctx.font="bold 36px sans-serif";
+    ctx.fillText("天赋已满级！", W/2, TALENT_UNLOCK_BTN.y+60);
+  }
+  // 返回按钮（海洋风格）
+  const grad2 = ctx.createLinearGradient(TALENT_BACK_BTN.x, TALENT_BACK_BTN.y, TALENT_BACK_BTN.x, TALENT_BACK_BTN.y+TALENT_BACK_BTN.h);
+  grad2.addColorStop(0,"#5c6bc0"); grad2.addColorStop(1,"#283593");
+  ctx.fillStyle=grad2;
+  roundRect(TALENT_BACK_BTN.x, TALENT_BACK_BTN.y, TALENT_BACK_BTN.w, TALENT_BACK_BTN.h, 24); ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,.3)"; ctx.lineWidth=2;
+  roundRect(TALENT_BACK_BTN.x, TALENT_BACK_BTN.y, TALENT_BACK_BTN.w, TALENT_BACK_BTN.h, 24); ctx.stroke();
+  ctx.fillStyle="#fff"; ctx.font="bold 34px sans-serif";
+  ctx.fillText("返回主菜单", W/2, TALENT_BACK_BTN.y+50);
+  // 拖动提示
+  ctx.fillStyle="rgba(255,255,255,.35)"; ctx.font="22px sans-serif";
+  ctx.fillText("↑ 上下拖动查看天赋树 ↓", W/2, 1980);
+}
+function drawReward(){
+  ctx.fillStyle="rgba(0,0,0,.55)"; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";
+  ctx.fillStyle="#ffd54f"; ctx.font="bold 60px sans-serif";
+  ctx.fillText("过关！选择一项奖励", W/2, 240);
+  ctx.fillStyle="#fff"; ctx.font="32px sans-serif";
+  ctx.fillText("当前金钱: "+money, W/2, 310);
+  if(recycleBonus>0){
+    ctx.fillStyle="#a5d6a7"; ctx.font="30px sans-serif";
+    ctx.fillText("回收剩余球 +"+recycleBonus+" 金钱", W/2, 360);
+  }
+  rewardPicks.forEach((p,i)=>{
+    const cy=520+i*420;
+    ctx.fillStyle="rgba(20,50,100,.95)"; roundRect(80,cy-170,W-160,340,30); ctx.fill();
+    ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=3; roundRect(80,cy-170,W-160,340,30); ctx.stroke();
+    if(p.type==="ball"){
+      const bd=BALLS[p.id];
+      ctx.shadowColor=bd.glow; ctx.shadowBlur=20;
+      ctx.fillStyle=bd.color; ctx.beginPath(); ctx.arc(200,cy,60,0,6.28); ctx.fill();
+      ctx.shadowBlur=0;
+      ctx.textAlign="left";
+      ctx.fillStyle=bd.color; ctx.font="bold 48px sans-serif"; ctx.fillText(bd.name, 300, cy-85);
+      ctx.fillStyle="#e0e0e0"; ctx.font="27px sans-serif";
+      ctx.fillText("攻击 "+bd.atk+"   速度 "+bd.speed+"   弹射 "+bd.rebound, 300, cy-30);
+      if(bd.effect>0){
+        ctx.fillStyle="#b39ddb"; ctx.font="bold 26px sans-serif";
+        ctx.fillText("特效：", 300, cy+25);
+        ctx.fillStyle="#d1c4e9"; ctx.font="25px sans-serif";
+        // 完整效果描述，自动换行
+        const desc = EFFECT_DESC[bd.effect]||"";
+        wrapText(desc, 300, cy+65, W-300-120, 34);
+      }
+      ctx.fillStyle="#90caf9"; ctx.font="26px sans-serif";
+      ctx.fillText("点击加入球池", 300, cy+140);
+    } else {
+      const e=EFFECTS[p.id];
+      ctx.fillStyle="#66bb6a"; ctx.beginPath();
+      ctx.moveTo(200,cy-55); ctx.lineTo(260,cy); ctx.lineTo(200,cy+55); ctx.lineTo(140,cy); ctx.closePath(); ctx.fill();
+      ctx.textAlign="left";
+      ctx.fillStyle="#a5d6a7"; ctx.font="bold 48px sans-serif"; ctx.fillText(e.name, 300, cy-85);
+      ctx.fillStyle="#e0e0e0"; ctx.font="27px sans-serif";
+      ctx.fillText(e.word, 300, cy-30);
+      ctx.fillStyle="#90caf9"; ctx.font="26px sans-serif";
+      ctx.fillText("点击获得永久全局加成", 300, cy+140);
+    }
+  });
+}
+// 简易自动换行
+function wrapText(text, x, y, maxW, lh){
+  let line="", yy=y;
+  for(let ch of text){
+    const test=line+ch;
+    if(ctx.measureText(test).width>maxW && line){
+      ctx.fillText(line, x, yy); line=ch; yy+=lh;
+    } else line=test;
+  }
+  if(line) ctx.fillText(line, x, yy);
+}
+function drawOver(){
+  ctx.fillStyle="rgba(0,0,0,.7)"; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";
+  ctx.fillStyle="#ef5350"; ctx.font="bold 80px sans-serif";
+  ctx.fillText("挑战失败", W/2, 750);
+  ctx.fillStyle="#fff"; ctx.font="36px sans-serif";
+  ctx.fillText("到达第 "+(levelIdx+1)+" 关", W/2, 870);
+  ctx.fillText("金钱 "+money+" / 目标 "+LEVELS[levelIdx].target, W/2, 930);
+  // 获得经验提示
+  ctx.fillStyle="#a5d6a7"; ctx.font="34px sans-serif";
+  ctx.fillText("本局获得 "+lastEarnedExp+" 点经验", W/2, 1010);
+  // 重新开始按钮
+  ctx.fillStyle="#ff7043"; roundRect(W/2-220,1450,440,130,30); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
+  ctx.fillText("重新开始", W/2, 1535);
+  // 回到主菜单按钮
+  ctx.fillStyle="#5c6bc0"; roundRect(W/2-220,1620,440,130,30); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 44px sans-serif";
+  ctx.fillText("回到主菜单", W/2, 1705);
+}
+function drawWin(){
+  ctx.fillStyle="rgba(0,0,0,.7)"; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";
+  ctx.fillStyle="#ffd54f"; ctx.font="bold 80px sans-serif";
+  ctx.fillText("🎉 全部通关！", W/2, 750);
+  ctx.fillStyle="#fff"; ctx.font="40px sans-serif";
+  ctx.fillText("你征服了深海的全部 50 关", W/2, 870);
+  ctx.fillStyle="#a5d6a7"; ctx.font="34px sans-serif";
+  ctx.fillText("本局获得 50 点经验，已计入天赋", W/2, 950);
+  ctx.fillStyle="#ff7043"; roundRect(W/2-220,1500,440,160,30); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
+  ctx.fillText("再玩一次", W/2, 1605);
+}
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function render(){
+  ctx.save();
+  if(screenShake>0) ctx.translate((Math.random()-.5)*screenShake,(Math.random()-.5)*screenShake);
+  drawBackground();
+  if(state===ST.MENU){ drawMenu(); ctx.restore(); return; }
+  if(state===ST.TALENT){ drawTalent(); ctx.restore(); return; }
+  // 场景区
+  ctx.save(); ctx.beginPath(); ctx.rect(0,FIELD_TOP,W,FIELD_BOT-FIELD_TOP); ctx.clip();
+  obstacles.forEach(drawObstacle);
+  fishes.forEach(drawFish);
+  balls.forEach(drawBall);
+  drawParticles();
+  ctx.restore();
+  drawTopUI(); drawBotUI(); drawAim();
+  if(state===ST.REWARD) drawReward();
+  if(state===ST.OVER) drawOver();
+  if(state===ST.WIN) drawWin();
+  ctx.restore();
+}
+
+/* ============================================================
+   主循环
+   ============================================================ */
+let last = performance.now();
+function loop(now){
+  let dt = (now-last)/1000; last=now;
+  if(dt>0.05) dt=0.05;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+loadSave();
+requestAnimationFrame(loop);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

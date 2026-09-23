@@ -1,0 +1,108 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  APP_ID: com.zyy.mori
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prepare Android project
+        run: |
+          if [ ! -f android/settings.gradle ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+          python3 << 'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          version = json.loads(Path("package.json").read_text(encoding="utf-8"))["version"]
+          parts = (version + ".0.0").split(".")[:3]
+          version_code = int(parts[0]) * 10000 + int(parts[1]) * 100 + int(parts[2])
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          mtext = manifest.read_text(encoding="utf-8")
+          if "screenOrientation" not in mtext:
+              mtext = mtext.replace(
+                  'android:name=".MainActivity"',
+                  'android:screenOrientation="portrait"\n            android:name=".MainActivity"',
+                  1,
+              )
+              manifest.write_text(mtext, encoding="utf-8")
+
+          gradle = Path("android/app/build.gradle")
+          gtext = gradle.read_text(encoding="utf-8")
+          gtext = re.sub(r'versionName\s+"[^"]*"', f'versionName "{version}"', gtext, count=1)
+          gtext = re.sub(r"versionCode\s+\d+", f"versionCode {version_code}", gtext, count=1)
+          if not re.search(
+              r"release\s*\{[^}]*signingConfig\s+signingConfigs\.debug",
+              gtext,
+              flags=re.S,
+          ):
+              gtext = re.sub(
+                  r"(buildTypes\s*\{[\s\S]*?release\s*\{)",
+                  r"\1\n            signingConfig signingConfigs.debug",
+                  gtext,
+                  count=1,
+              )
+          gradle.write_text(gtext, encoding="utf-8")
+          PY
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Rename APK (production naming)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          mkdir -p dist
+          OUT="dist/${APP_ID}-${VERSION}-release.apk"
+          SRC="android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$SRC" ]; then
+            SRC="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          fi
+          if [ ! -f "$SRC" ]; then
+            echo "Release APK not found under android/app/build/outputs/apk/release/"
+            ls -la android/app/build/outputs/apk/release/ || true
+            exit 1
+          fi
+          cp "$SRC" "$OUT"
+          echo "APK_OUT=$OUT" >> "$GITHUB_ENV"
+          echo "APK_NAME=$(basename "$OUT")" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_ID }}-release
+          path: ${{ env.APK_OUT }}
+          if-no-files-found: error
