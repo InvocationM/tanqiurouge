@@ -1,8 +1,8 @@
 {
   "name": "tanqiurouge",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
-  "description": "弹球肉鸽 · 深海弹射 — WebView APK (Capacitor)",
+  "description": "深海弹球 — WebView APK (Capacitor)",
   "scripts": {
     "prepare:www": "node scripts/write-cap-www.cjs",
     "sync": "npm run prepare:www && cap sync android",

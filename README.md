@@ -1,4 +1,4 @@
-# tanqiurouge · 弹球肉鸽
+# tanqiurouge · 深海弹球
 
 单文件 HTML 游戏，用 Capacitor 打包为 Android APK。推送 `main` 分支会在 GitHub Actions 自动构建。
 
