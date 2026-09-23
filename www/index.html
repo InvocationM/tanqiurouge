@@ -16,6 +16,22 @@
 <script>
 "use strict";
 /* ============================================================
+   性能档位（Android WebView / Capacitor 壳内降负载）
+   ============================================================ */
+const IS_NATIVE_SHELL = /;\s*wv\)/i.test(navigator.userAgent)
+  || /Capacitor/i.test(navigator.userAgent)
+  || (typeof window.Capacitor !== "undefined" && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const PERF_LIGHT = IS_NATIVE_SHELL
+  || ((navigator.hardwareConcurrency || 8) <= 4)
+  || (navigator.maxTouchPoints > 0 && (window.devicePixelRatio || 1) >= 2.5);
+const BALL_TRAIL_MAX = PERF_LIGHT ? 5 : 12;
+const BGM_TICK_MS = PERF_LIGHT ? 680 : 420;
+function setBallGlow(color, blur){
+  if(!blur || PERF_LIGHT){ ctx.shadowBlur = 0; return; }
+  ctx.shadowColor = color;
+  ctx.shadowBlur = blur;
+}
+/* ============================================================
    音频引擎（Web Audio 程序化合成，无外部文件）
    ============================================================ */
 let AC=null, masterGain=null, sfxOn=true, bgmOn=true, bgmTimer=null, bgmStep=0, lastBounceSnd=0;
@@ -79,20 +95,18 @@ function startBGM(){
     // 主旋律（舒缓长音）
     const f=BGM_MELODY[bgmStep%BGM_MELODY.length];
     tone(f,0.6,"sine",0.05);
-    tone(f*2,0.4,"sine",0.02); // 高八度泛音
-    // 低音铺底（每4步）
+    if(!PERF_LIGHT) tone(f*2,0.4,"sine",0.02);
     if(bgmStep%4===0){
       const bf=BGM_BASS[(bgmStep/4)%BGM_BASS.length|0];
       tone(bf,1.2,"triangle",0.04);
-      tone(bf*1.5,1.0,"sine",0.02);
+      if(!PERF_LIGHT) tone(bf*1.5,1.0,"sine",0.02);
     }
-    // 随机水滴音（偶尔）
-    if(Math.random()<0.25){
+    if(!PERF_LIGHT && Math.random()<0.25){
       const drop=[1047,1175,1319,1568][Math.floor(Math.random()*4)];
       tone(drop,0.3,"sine",0.03,null,0);
     }
     bgmStep++;
-  },420);
+  },BGM_TICK_MS);
 }
 function stopBGM(){ if(bgmTimer){clearInterval(bgmTimer);bgmTimer=null;} }
 /* ============================================================
@@ -197,7 +211,7 @@ const LEVELS = (()=>{
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 function fitCanvas(){
-  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const dpr = Math.min(window.devicePixelRatio||1, PERF_LIGHT ? 1.25 : 2);
   const scale = Math.min(window.innerWidth/W, window.innerHeight/H);
   canvas.style.width  = (W*scale)+'px';
   canvas.style.height = (H*scale)+'px';
@@ -264,9 +278,9 @@ let plankton = [];
 let screenShake = 0;
 
 // 背景气泡
-for(let i=0;i<40;i++) bubbles.push({x:Math.random()*W, y:Math.random()*H, r:2+Math.random()*8, s:10+Math.random()*30});
+for(let i=0;i<(PERF_LIGHT?16:40);i++) bubbles.push({x:Math.random()*W, y:Math.random()*H, r:2+Math.random()*8, s:10+Math.random()*30});
 // 浮游颗粒（marine snow）
-for(let i=0;i<70;i++) plankton.push({
+for(let i=0;i<(PERF_LIGHT?28:70);i++) plankton.push({
   x:Math.random()*W, y:FIELD_TOP+Math.random()*(FIELD_BOT-FIELD_TOP),
   r:1+Math.random()*2.6, s:8+Math.random()*22,
   ph:Math.random()*6.28, dr:0.3+Math.random()*0.6
@@ -500,7 +514,7 @@ function update(dt){
     // 球移动与碰撞
     for(let i=balls.length-1;i>=0;i--){
       const b=balls[i];
-      b.trail.push({x:b.x,y:b.y}); if(b.trail.length>12)b.trail.shift();
+      b.trail.push({x:b.x,y:b.y}); if(b.trail.length>BALL_TRAIL_MAX)b.trail.shift();
       b.x+=b.vx*dt; b.y+=b.vy*dt;
       // 边界
       if(b.x<b.r){ b.x=b.r; b.vx=Math.abs(b.vx); b.rebound--; onBounce(b); }
@@ -736,8 +750,9 @@ function drawBackground(){
   // 2. 丁达尔光柱（god rays）：从水面斜射，随时间轻微摆动
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  for(let i=0;i<6;i++){
-    const bx = ((i/6)*W + Math.sin(t*0.25+i*1.7)*90 + W)%(W+400)-200;
+  const rayCount = PERF_LIGHT ? 3 : 6;
+  for(let i=0;i<rayCount;i++){
+    const bx = ((i/rayCount)*W + Math.sin(t*0.25+i*1.7)*90 + W)%(W+400)-200;
     const sway = Math.sin(t*0.4+i)*30;
     const topW = 60+Math.sin(t*0.6+i*2)*30;
     const grad = ctx.createLinearGradient(0,0,0,FIELD_BOT);
@@ -767,7 +782,8 @@ function drawBackground(){
   ctx.lineTo(W, FIELD_BOT); ctx.closePath(); ctx.fill();
   // 珊瑚/海草剪影（固定位置，轻微摇摆）
   ctx.fillStyle="rgba(6,35,66,0.9)";
-  for(let i=0;i<9;i++){
+  const coralCount = PERF_LIGHT ? 5 : 9;
+  for(let i=0;i<coralCount;i++){
     const cx = (i*137+80)%W;
     const baseY = FIELD_BOT - 20 - Math.sin(cx*0.012)*30;
     const h = 60+((i*53)%90);
@@ -792,11 +808,12 @@ function drawBackground(){
   ctx.strokeStyle="rgba(180,225,255,.22)";
   bubbles.forEach(b=>{ ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.stroke(); });
 
-  // 6. 暗角 vignette
-  const vg = ctx.createRadialGradient(W/2,H/2, H*0.3, W/2,H/2, H*0.75);
-  vg.addColorStop(0,"rgba(0,0,0,0)");
-  vg.addColorStop(1,"rgba(0,5,20,0.55)");
-  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+  if(!PERF_LIGHT){
+    const vg = ctx.createRadialGradient(W/2,H/2, H*0.3, W/2,H/2, H*0.75);
+    vg.addColorStop(0,"rgba(0,0,0,0)");
+    vg.addColorStop(1,"rgba(0,5,20,0.55)");
+    ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+  }
 }
 function drawFish(f){
   ctx.save(); ctx.translate(f.x,f.y);
@@ -1041,7 +1058,7 @@ function drawBall(b){
     ctx.beginPath(); ctx.arc(t.x,t.y,b.r*a,0,6.28); ctx.fill();
   }
   ctx.globalAlpha=1;
-  ctx.shadowColor=b.glow; ctx.shadowBlur=20;
+  setBallGlow(b.glow, 20);
   ctx.fillStyle=b.color; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.fill();
   ctx.shadowBlur=0;
   ctx.fillStyle="rgba(255,255,255,.7)";
@@ -1175,7 +1192,7 @@ function drawBotUI(){
       if(used[i]) continue;
       const bd=BALLS[ballPool[i]];
       if(i===curBall){
-        ctx.shadowColor=bd.glow; ctx.shadowBlur=18;
+        setBallGlow(bd.glow, 18);
         ctx.fillStyle=bd.color;
       } else {
         ctx.globalAlpha=0.55; ctx.fillStyle=bd.color;
@@ -1212,7 +1229,7 @@ function drawAim(){
     ctx.restore();
   }
   // 常驻显示发射点的待发弹球
-  ctx.shadowColor=d.glow; ctx.shadowBlur=25;
+  setBallGlow(d.glow, 25);
   ctx.fillStyle=d.color; ctx.beginPath(); ctx.arc(LAUNCH.x,LAUNCH.y,26,0,6.28); ctx.fill();
   ctx.shadowBlur=0;
   ctx.fillStyle="rgba(255,255,255,.7)";
@@ -1316,10 +1333,10 @@ function drawTalent(){
       r = TALENT_R*pulse;
     }
     if(unlocked){
-      ctx.shadowColor=color; ctx.shadowBlur=16;
+      setBallGlow(color, 16);
       ctx.fillStyle=color;
     } else if(isNext){
-      ctx.shadowColor=color; ctx.shadowBlur=24;
+      setBallGlow(color, 24);
       ctx.fillStyle=color;
     } else {
       ctx.shadowBlur=0;
@@ -1402,7 +1419,7 @@ function drawReward(){
     ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=3; roundRect(80,cy-170,W-160,340,30); ctx.stroke();
     if(p.type==="ball"){
       const bd=BALLS[p.id];
-      ctx.shadowColor=bd.glow; ctx.shadowBlur=20;
+      setBallGlow(bd.glow, 20);
       ctx.fillStyle=bd.color; ctx.beginPath(); ctx.arc(200,cy,60,0,6.28); ctx.fill();
       ctx.shadowBlur=0;
       ctx.textAlign="left";
@@ -1513,7 +1530,6 @@ function loop(now){
   requestAnimationFrame(loop);
 }
 loadSave();
-requestAnimationFrame(loop);
 requestAnimationFrame(loop);
 </script>
 </body>
