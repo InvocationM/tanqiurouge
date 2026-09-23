@@ -14,3 +14,7 @@ Android 包名（applicationId）：**`com.zyy.mori`**
 ## 更新游戏
 
 修改 `www/index.html` 后 push 即可重新打包。
+
+## 好游快爆防沉迷（仅 Android 壳）
+
+见 [`hykb-sdk/README.md`](hykb-sdk/README.md)：`hykb-sdk/libs/` 已含 OperateSDK aar，`hykb.properties` 内 gameId 为 `45381`。未放 aar 时与纯 WebView 包相同。

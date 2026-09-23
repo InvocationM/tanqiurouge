@@ -1,10 +1,11 @@
 {
   "name": "tanqiurouge",
-  "version": "1.0.8",
+  "version": "1.0.10",
   "private": true,
   "description": "深海弹球 — WebView APK (Capacitor)",
   "scripts": {
     "prepare:www": "node scripts/write-cap-www.cjs",
+    "import:hykb": "node scripts/import-hykb-operate-sdk.cjs",
     "sync": "npm run prepare:www && cap sync android",
     "open:android": "cap open android"
   },

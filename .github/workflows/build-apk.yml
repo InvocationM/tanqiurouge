@@ -92,6 +92,11 @@ jobs:
           gradle.write_text(gtext, encoding="utf-8")
           PY
 
+      - name: Integrate Hykb anti-addiction SDK (OperateSDK / Android shell)
+        run: |
+          node scripts/integrate-hykb-android.cjs
+          ls -la hykb-sdk/libs/ || true
+
       - name: Build release APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
