@@ -92,6 +92,9 @@ jobs:
           gradle.write_text(gtext, encoding="utf-8")
           PY
 
+      - name: Apply app launcher icon
+        run: node scripts/apply-android-icon.cjs
+
       - name: Integrate Hykb anti-addiction SDK (OperateSDK / Android shell)
         run: |
           node scripts/integrate-hykb-android.cjs
