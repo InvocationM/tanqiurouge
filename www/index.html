@@ -253,6 +253,7 @@ const AGE_RATING = 12;
 const AGE_BADGE = { x: 36, y: 36, w: 132, h: 156 };
 const AGE_BADGE_IMG_SRC = "assets/cadpa-12plus.png";
 const AGE_TIP_CLOSE = { x: W/2-180, y: 1880, w: 360, h: 88 };
+const PRIVACY_BTN = { x: 184, y: 52, w: 196, h: 96 };
 let ageBadgeImg = null;
 let ageBadgeImgReady = false;
 (function loadAgeBadgeImg(){
@@ -287,6 +288,13 @@ function hitAgeBadge(p){
 function hitAgeTipClose(p){
   const b=AGE_TIP_CLOSE;
   return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h;
+}
+function hitPrivacyBtn(p){
+  const b=PRIVACY_BTN;
+  return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h;
+}
+function openPrivacyPolicy(){
+  window.location.href = "privacy.html";
 }
 function saveSave(){
   try{
@@ -729,6 +737,7 @@ canvas.addEventListener('pointerdown', e=>{
       return;
     }
     if(hitAgeBadge(p)){ ageTipOpen=true; return; }
+    if(hitPrivacyBtn(p)){ openPrivacyPolicy(); return; }
     // 开始按钮
     if(p.y>1380 && p.y<1530 && p.x>W/2-220 && p.x<W/2+220){ restartGame(); return; }
     // 天赋按钮
@@ -1377,6 +1386,17 @@ function drawAgeBadge(){
     ctx.fillText("适龄标识加载中…", b.x, b.y+b.h/2);
   }
 }
+function drawPrivacyBtn(){
+  const b=PRIVACY_BTN;
+  ctx.fillStyle="rgba(6,35,68,.82)";
+  roundRect(b.x, b.y, b.w, b.h, 16); ctx.fill();
+  ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=2;
+  roundRect(b.x, b.y, b.w, b.h, 16); ctx.stroke();
+  ctx.textAlign="center";
+  ctx.fillStyle="#e1f5fe"; ctx.font="bold 32px sans-serif";
+  ctx.fillText("隐私政策", b.x+b.w/2, b.y+b.h/2+11);
+  ctx.textAlign="left";
+}
 function drawAgeTipOverlay(){
   ctx.fillStyle="rgba(0,8,24,.78)"; ctx.fillRect(0,0,W,H);
   ctx.fillStyle="rgba(12,40,80,.98)";
@@ -1408,6 +1428,7 @@ function drawAgeTipOverlay(){
 }
 function drawMenu(){
   drawAgeBadge();
+  drawPrivacyBtn();
   ctx.textAlign="center";
   ctx.fillStyle="#e1f5fe"; ctx.font="bold 90px sans-serif";
   ctx.fillText("深海弹球", W/2, 640);
