@@ -13,6 +13,8 @@
 </head>
 <body>
 <div id="wrap"><canvas id="game"></canvas></div>
+<script src="capacitor.js"></script>
+<script src="cap-app.js"></script>
 <script>
 "use strict";
 /* ============================================================
@@ -21,9 +23,9 @@
 const IS_NATIVE_SHELL = /;\s*wv\)/i.test(navigator.userAgent)
   || /Capacitor/i.test(navigator.userAgent)
   || (typeof window.Capacitor !== "undefined" && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-const PERF_LIGHT = IS_NATIVE_SHELL
-  || ((navigator.hardwareConcurrency || 8) <= 4)
-  || (navigator.maxTouchPoints > 0 && (window.devicePixelRatio || 1) >= 2.5);
+const IS_MOBILE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || navigator.maxTouchPoints > 0;
+const PERF_LIGHT = IS_NATIVE_SHELL || IS_MOBILE;
+const DPR_MAX = PERF_LIGHT ? 1 : 2;
 const BALL_TRAIL_MAX = PERF_LIGHT ? 5 : 12;
 const BGM_TICK_MS = PERF_LIGHT ? 680 : 420;
 function setBallGlow(color, blur){
@@ -211,7 +213,7 @@ const LEVELS = (()=>{
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 function fitCanvas(){
-  const dpr = Math.min(window.devicePixelRatio||1, PERF_LIGHT ? 1.25 : 2);
+  const dpr = Math.min(window.devicePixelRatio||1, DPR_MAX);
   const scale = Math.min(window.innerWidth/W, window.innerHeight/H);
   canvas.style.width  = (W*scale)+'px';
   canvas.style.height = (H*scale)+'px';
@@ -387,7 +389,7 @@ function launchBall(tx,ty){
   // 若所有球都已发完，next 指向任意；判断是否还有未发射的
   const hasLeft = ballPool.some((_,i)=>!used[i]);
   if(hasLeft){ curBall = firstUnused(); state = ST.AIM; }
-  else { state = ST.PLAY; settleTimer = 1.2; }
+  else { state = ST.PLAY; settleTimer = 0; }
 }
 function reflect(vx,vy,nx,ny){
   const dot = vx*nx+vy*ny;
@@ -587,10 +589,34 @@ function checkRoundEnd(){
     showSettle();
     return;
   }
-  // 球已全部打完且场上无球 → 进入胜负结算（含未达标失败）
-  if(state===ST.PLAY && settleTimer<=0 && balls.length===0){
+  if(state===ST.PLAY && balls.length===0){
     recycleBonus = 0;
     showSettle();
+  }
+}
+function forceSettleNow(){
+  if(state!==ST.PLAY && state!==ST.AIM) return;
+  balls.length = 0;
+  particles.length = 0;
+  settleTimer = 0;
+  const unused = ballPool.filter((_,i)=>!used[i]).length;
+  if(unused>0){
+    recycleBonus = unused*50;
+    money += recycleBonus;
+  } else {
+    recycleBonus = 0;
+  }
+  showSettle();
+}
+function catchUpSimulation(seconds){
+  let budget = Math.min(Math.max(0, seconds), 5);
+  const step = 0.032;
+  let guard = 0;
+  while(budget > 0.001 && guard++ < 400){
+    if(state!==ST.AIM && state!==ST.PLAY) break;
+    const dt = Math.min(step, budget);
+    update(dt);
+    budget -= dt;
   }
 }
 function onBounce(b){
@@ -699,6 +725,7 @@ canvas.addEventListener('pointerdown', e=>{
     if(p.y>1620 && p.y<1750 && p.x>W/2-220 && p.x<W/2+220){ state=ST.MENU; stopBGM(); }
     return;
   }
+  if(state===ST.PLAY && hitForceSettle(p)){ forceSettleNow(); return; }
   if(state===ST.REWARD){
     // 三张卡片
     for(let i=0;i<3;i++){
@@ -749,6 +776,18 @@ function restartGame(){
    绘制
    ============================================================ */
 function drawBackground(){
+  const liteBg = PERF_LIGHT && (state===ST.PLAY || state===ST.AIM);
+  if(liteBg){
+    ctx.fillStyle="#0b3d70";
+    ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle="rgba(180,225,255,.14)";
+    bubbles.forEach(b=>{
+      if(b.y>=FIELD_TOP-40 && b.y<=FIELD_BOT+40){
+        ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.stroke();
+      }
+    });
+    return;
+  }
   // 1. 电影级垂直渐变：表层青 → 中层蓝 → 深渊墨蓝
   const g = ctx.createLinearGradient(0,0,0,H);
   g.addColorStop(0,"#1b6fae");
@@ -827,6 +866,27 @@ function drawBackground(){
     vg.addColorStop(1,"rgba(0,5,20,0.55)");
     ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
   }
+}
+function drawFishHud(f){
+  const bw=f.r*2, bh=8, bx=f.x-bw/2, by=f.y-f.r-22;
+  ctx.fillStyle="rgba(0,0,0,.5)"; ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle = f.hp/f.maxHp>0.4?"#69f0ae":"#ff5252";
+  ctx.fillRect(bx,by,bw*Math.max(0,f.hp/f.maxHp),bh);
+  ctx.fillStyle="#ffd54f"; ctx.font="bold 22px sans-serif"; ctx.textAlign="center";
+  ctx.fillText("$"+f.money, f.x, by+bh+20);
+}
+function drawFishLite(f){
+  ctx.save(); ctx.translate(f.x,f.y);
+  const hue=(f.id*37)%360;
+  const ang=Math.atan2(f.vy,f.vx);
+  ctx.rotate(ang + Math.sin(f.wobble)*0.12);
+  ctx.fillStyle=`hsl(${hue},65%,52%)`;
+  ctx.beginPath(); ctx.ellipse(0,0,f.r,f.r*0.72,0,0,6.28); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(f.r*0.35,-f.r*0.15,f.r*0.14,0,6.28); ctx.fill();
+  if(f.poison>0){ ctx.fillStyle="rgba(120,200,60,.35)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.05,0,6.28); ctx.fill(); }
+  if(f.frozen){ ctx.fillStyle="rgba(150,230,255,.45)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.02,0,6.28); ctx.fill(); }
+  ctx.restore();
+  drawFishHud(f);
 }
 function drawFish(f){
   ctx.save(); ctx.translate(f.x,f.y);
@@ -1054,14 +1114,7 @@ function drawFish(f){
   if(f.poison>0){ ctx.fillStyle="rgba(120,200,60,.35)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.1,0,6.28); ctx.fill(); }
   if(f.frozen){ ctx.fillStyle="rgba(150,230,255,.5)"; ctx.beginPath(); ctx.arc(0,0,f.r*1.05,0,6.28); ctx.fill(); }
   ctx.restore();
-  // 血条
-  const bw=f.r*2, bh=8, bx=f.x-bw/2, by=f.y-f.r-22;
-  ctx.fillStyle="rgba(0,0,0,.5)"; ctx.fillRect(bx,by,bw,bh);
-  ctx.fillStyle = f.hp/f.maxHp>0.4?"#69f0ae":"#ff5252";
-  ctx.fillRect(bx,by,bw*Math.max(0,f.hp/f.maxHp),bh);
-  // 金钱奖励标注
-  ctx.fillStyle="#ffd54f"; ctx.font="bold 22px sans-serif"; ctx.textAlign="center";
-  ctx.fillText("$"+f.money, f.x, by+bh+20);
+  drawFishHud(f);
 }
 function drawBall(b){
   // 拖尾
@@ -1165,8 +1218,22 @@ function drawTopUI(){
   ctx.font="30px sans-serif";
   ctx.fillStyle = sfxOn ? "#80cbc4" : "#78909c";
   ctx.fillText(sfxOn ? "♪" : "✕", W-150, 58);
+  if(state===ST.PLAY){
+    const b=FORCE_SETTLE_BTN;
+    ctx.fillStyle="rgba(30,80,150,.92)";
+    roundRect(b.x,b.y,b.w,b.h,12); ctx.fill();
+    ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=2;
+    roundRect(b.x,b.y,b.w,b.h,12); ctx.stroke();
+    ctx.fillStyle="#fff"; ctx.font="bold 26px sans-serif"; ctx.textAlign="center";
+    ctx.fillText("立即结算", b.x+b.w/2, b.y+b.h/2+9);
+  }
 }
 const MUTE_BTN = { x: W-150, y: 45, r: 26 };
+const FORCE_SETTLE_BTN = { x: W-200, y: 118, w: 170, h: 52 };
+function hitForceSettle(p){
+  const b=FORCE_SETTLE_BTN;
+  return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h;
+}
 function drawBotUI(){
   ctx.fillStyle="rgba(0,20,50,.85)"; ctx.fillRect(0,FIELD_BOT,W,BOT_UI);
   if(state===ST.AIM || state===ST.PLAY){
@@ -1520,7 +1587,10 @@ function render(){
   // 场景区
   ctx.save(); ctx.beginPath(); ctx.rect(0,FIELD_TOP,W,FIELD_BOT-FIELD_TOP); ctx.clip();
   obstacles.forEach(drawObstacle);
-  fishes.forEach(drawFish);
+  fishes.forEach(f=>{
+    if(PERF_LIGHT && state===ST.PLAY) drawFishLite(f);
+    else drawFish(f);
+  });
   balls.forEach(drawBall);
   drawParticles();
   ctx.restore();
@@ -1549,13 +1619,15 @@ function onAppHidden(){
 }
 function onAppVisible(){
   const now = performance.now();
+  let away = 0;
   if(hiddenAt>0){
-    const away = (now-hiddenAt)/1000;
+    away = (now-hiddenAt)/1000;
     if(state===ST.PLAY && settleTimer>0) settleTimer = Math.max(0, settleTimer-away);
     hiddenAt = 0;
   }
   last = now;
   try{ if(AC && AC.state==="suspended") AC.resume(); }catch(e){}
+  if(away>0.2 && (state===ST.PLAY || state===ST.AIM)) catchUpSimulation(away);
   checkRoundEnd();
   requestAnimationFrame(loop);
 }
@@ -1567,6 +1639,8 @@ window.addEventListener("pagehide", onAppHidden);
 window.addEventListener("pageshow", onAppVisible);
 window.addEventListener("blur", releasePointers);
 window.addEventListener("focus", onAppVisible);
+window.addEventListener("game:pause", onAppHidden);
+window.addEventListener("game:resume", onAppVisible);
 loadSave();
 requestAnimationFrame(loop);
 </script>

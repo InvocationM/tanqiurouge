@@ -4,3 +4,5 @@ node_modules/
 .idea/
 local.properties
 android/
+www/capacitor.js
+www/cap-app.js
