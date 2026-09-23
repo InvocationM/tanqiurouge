@@ -570,17 +570,27 @@ function update(dt){
         balls.splice(i,1);
       }
     }
-    // 鱼全部消灭 → 立刻结算（回收剩余球）
-    if((state===ST.AIM||state===ST.PLAY) && fishes.length===0){
-      const unused = ballPool.filter((_,i)=>!used[i]).length;
-      if(unused>0){
-        recycleBonus = unused*50;
-        money += recycleBonus;
-      } else {
-        recycleBonus = 0;
-      }
-      showSettle();
+    if(state===ST.PLAY && settleTimer>0) settleTimer -= dt;
+  }
+  if(state===ST.AIM || state===ST.PLAY) checkRoundEnd();
+}
+function checkRoundEnd(){
+  if(state!==ST.AIM && state!==ST.PLAY) return;
+  if(fishes.length===0){
+    const unused = ballPool.filter((_,i)=>!used[i]).length;
+    if(unused>0){
+      recycleBonus = unused*50;
+      money += recycleBonus;
+    } else {
+      recycleBonus = 0;
     }
+    showSettle();
+    return;
+  }
+  // 球已全部打完且场上无球 → 进入胜负结算（含未达标失败）
+  if(state===ST.PLAY && settleTimer<=0 && balls.length===0){
+    recycleBonus = 0;
+    showSettle();
   }
 }
 function onBounce(b){
@@ -717,14 +727,17 @@ canvas.addEventListener('pointermove', e=>{
     }
   }
 });
-canvas.addEventListener('pointerup', e=>{
-  if(pressing && state===ST.AIM && aim){
-    // 防止朝发射点发射
-    if(Math.hypot(aim.x-LAUNCH.x, aim.y-LAUNCH.y)>60) launchBall(aim.x, aim.y);
-  }
+function releasePointers(){
   pressing=false;
   talentDrag=null;
+}
+canvas.addEventListener('pointerup', e=>{
+  if(pressing && state===ST.AIM && aim){
+    if(Math.hypot(aim.x-LAUNCH.x, aim.y-LAUNCH.y)>60) launchBall(aim.x, aim.y);
+  }
+  releasePointers();
 });
+canvas.addEventListener('pointercancel', releasePointers);
 function restartGame(){
   ac(); startBGM();
   const tb=talentBonus();
@@ -1522,6 +1535,7 @@ function render(){
    主循环
    ============================================================ */
 let last = performance.now();
+let hiddenAt = 0;
 function loop(now){
   let dt = (now-last)/1000; last=now;
   if(dt>0.05) dt=0.05;
@@ -1529,6 +1543,30 @@ function loop(now){
   render();
   requestAnimationFrame(loop);
 }
+function onAppHidden(){
+  hiddenAt = performance.now();
+  releasePointers();
+}
+function onAppVisible(){
+  const now = performance.now();
+  if(hiddenAt>0){
+    const away = (now-hiddenAt)/1000;
+    if(state===ST.PLAY && settleTimer>0) settleTimer = Math.max(0, settleTimer-away);
+    hiddenAt = 0;
+  }
+  last = now;
+  try{ if(AC && AC.state==="suspended") AC.resume(); }catch(e){}
+  checkRoundEnd();
+  requestAnimationFrame(loop);
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="hidden") onAppHidden();
+  else onAppVisible();
+});
+window.addEventListener("pagehide", onAppHidden);
+window.addEventListener("pageshow", onAppVisible);
+window.addEventListener("blur", releasePointers);
+window.addEventListener("focus", onAppVisible);
 loadSave();
 requestAnimationFrame(loop);
 </script>
