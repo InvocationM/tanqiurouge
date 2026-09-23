@@ -247,12 +247,38 @@ const TALENTS = (()=>{
 })();
 let totalExp=0, talentUnlocked=0, moneyTalent=0;
 let talentScroll=0, talentDrag=null;
+let ageTipOpen=false;
+/* 适龄提示（CADPA / 好游快爆上架要求：开始界面显著位置，可点击查看说明） */
+const AGE_RATING = 12;
+const AGE_BADGE = { x: 36, y: 36, w: 132, h: 156 };
+const AGE_TIP_CLOSE = { x: W/2-180, y: 1880, w: 360, h: 88 };
+const AGE_TIP_LINES = [
+  "【网络游戏适龄提示】",
+  "1. 本游戏《弹球肉鸽·深海弹射》为休闲弹射类单机游戏，包含卡通风格的轻度对抗与策略选择玩法，无血腥、色情、赌博内容。",
+  "2. 本游戏适用于12周岁及以上的用户；8周岁以下儿童不建议单独使用电子产品进行游戏。",
+  "3. 建议未成年人家长在监护人陪同下了解游戏内容，并帮助未成年人合理安排游戏时间，养成健康游戏习惯。",
+  "4. 本游戏当前版本为单机体验，无游戏内充值与消费；若后续接入平台账号与联网服务，将按国家要求提供实名认证与未成年人防沉迷限制（游戏时长、付费等）。",
+  "5. 根据国家新闻出版署相关规定，未成年人仅在法定时间段内可进行有限时长的网络游戏体验。请理性游戏，适度休息。",
+  "标识说明：CADPA 为中国音像与数字出版协会英文缩写。适龄标识应放置于游戏开始界面显著位置，点击可查看本说明。",
+];
 function loadSave(){
   try{
     totalExp = parseInt(localStorage.getItem('pb_totalExp')||'0')||0;
     talentUnlocked = parseInt(localStorage.getItem('pb_talent')||'0')||0;
-  }catch(e){ totalExp=0; talentUnlocked=0; }
+    ageTipOpen = localStorage.getItem('pb_ageTipSeen')!=='1';
+  }catch(e){ totalExp=0; talentUnlocked=0; ageTipOpen=true; }
   if(talentUnlocked>TALENTS.length) talentUnlocked=TALENTS.length;
+}
+function markAgeTipSeen(){
+  try{ localStorage.setItem('pb_ageTipSeen','1'); }catch(e){}
+}
+function hitAgeBadge(p){
+  const b=AGE_BADGE;
+  return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h;
+}
+function hitAgeTipClose(p){
+  const b=AGE_TIP_CLOSE;
+  return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h;
 }
 function saveSave(){
   try{
@@ -690,6 +716,11 @@ canvas.addEventListener('pointerdown', e=>{
     return;
   }
   if(state===ST.MENU){
+    if(ageTipOpen){
+      if(hitAgeTipClose(p)){ ageTipOpen=false; markAgeTipSeen(); }
+      return;
+    }
+    if(hitAgeBadge(p)){ ageTipOpen=true; return; }
     // 开始按钮
     if(p.y>1380 && p.y<1530 && p.x>W/2-220 && p.x<W/2+220){ restartGame(); return; }
     // 天赋按钮
@@ -1321,7 +1352,55 @@ function drawParticles(){
   });
   ctx.globalAlpha=1;
 }
+function drawAgeBadge(){
+  const b=AGE_BADGE;
+  ctx.save();
+  ctx.shadowColor="rgba(0,0,0,.45)"; ctx.shadowBlur=8;
+  ctx.fillStyle="#1565c0";
+  roundRect(b.x,b.y,b.w,b.h,14); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.strokeStyle="#fff"; ctx.lineWidth=3;
+  roundRect(b.x,b.y,b.w,b.h,14); ctx.stroke();
+  ctx.fillStyle="#fff"; ctx.textAlign="center";
+  ctx.font="bold 64px sans-serif";
+  ctx.fillText(AGE_RATING+"+", b.x+b.w/2, b.y+72);
+  ctx.font="bold 22px sans-serif";
+  ctx.fillText("CADPA", b.x+b.w/2, b.y+108);
+  ctx.font="22px sans-serif";
+  ctx.fillText("适龄提示", b.x+b.w/2, b.y+138);
+  ctx.font="18px sans-serif";
+  ctx.fillStyle="rgba(255,255,255,.85)";
+  ctx.fillText("点击查看", b.x+b.w/2, b.y+168);
+  ctx.restore();
+}
+function drawAgeTipOverlay(){
+  ctx.fillStyle="rgba(0,8,24,.78)"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="rgba(12,40,80,.98)";
+  roundRect(48, 220, W-96, 1620, 24); ctx.fill();
+  ctx.strokeStyle="#4fc3f7"; ctx.lineWidth=3;
+  roundRect(48, 220, W-96, 1620, 24); ctx.stroke();
+  ctx.textAlign="center";
+  ctx.fillStyle="#ffd54f"; ctx.font="bold 44px sans-serif";
+  ctx.fillText("适龄提示说明", W/2, 300);
+  ctx.fillStyle="#1565c0";
+  roundRect(W/2-70, 320, 140, 100, 12); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
+  ctx.fillText(AGE_RATING+"+", W/2, 392);
+  ctx.textAlign="left";
+  ctx.fillStyle="rgba(255,255,255,.92)"; ctx.font="28px sans-serif";
+  let ty=460;
+  AGE_TIP_LINES.forEach(line=>{
+    ty = wrapText(line, 88, ty, W-176, 40);
+    ty += 12;
+  });
+  ctx.textAlign="center";
+  ctx.fillStyle="#ff7043";
+  roundRect(AGE_TIP_CLOSE.x, AGE_TIP_CLOSE.y, AGE_TIP_CLOSE.w, AGE_TIP_CLOSE.h, 20); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 38px sans-serif";
+  ctx.fillText("我知道了", W/2, AGE_TIP_CLOSE.y+58);
+}
 function drawMenu(){
+  drawAgeBadge();
   ctx.textAlign="center";
   ctx.fillStyle="#e1f5fe"; ctx.font="bold 90px sans-serif";
   ctx.fillText("弹球肉鸽", W/2, 600);
@@ -1342,6 +1421,7 @@ function drawMenu(){
   ctx.fillText("经验 "+totalExp+" · 已解锁 "+talentUnlocked+"/100", W/2, 1690);
   ctx.fillStyle="rgba(255,255,255,.45)"; ctx.font="26px sans-serif";
   ctx.fillText("共 30 关 · 4 个原始球起步", W/2, 1830);
+  if(ageTipOpen) drawAgeTipOverlay();
 }
 // ===== 天赋界面（树状节点图）=====
 const TALENT_COLOR = {1:"#ef5350", 2:"#42a5f5", 3:"#ffd54f", 4:"#ab47bc"};
@@ -1525,7 +1605,8 @@ function wrapText(text, x, y, maxW, lh){
       ctx.fillText(line, x, yy); line=ch; yy+=lh;
     } else line=test;
   }
-  if(line) ctx.fillText(line, x, yy);
+  if(line){ ctx.fillText(line, x, yy); yy+=lh; }
+  return yy;
 }
 function drawOver(){
   ctx.fillStyle="rgba(0,0,0,.7)"; ctx.fillRect(0,0,W,H);
