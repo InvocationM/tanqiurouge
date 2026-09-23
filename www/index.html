@@ -251,7 +251,15 @@ let ageTipOpen=false;
 /* 适龄提示（CADPA / 好游快爆上架要求：开始界面显著位置，可点击查看说明） */
 const AGE_RATING = 12;
 const AGE_BADGE = { x: 36, y: 36, w: 132, h: 156 };
+const AGE_BADGE_IMG_SRC = "assets/cadpa-12plus.png";
 const AGE_TIP_CLOSE = { x: W/2-180, y: 1880, w: 360, h: 88 };
+let ageBadgeImg = null;
+let ageBadgeImgReady = false;
+(function loadAgeBadgeImg(){
+  const img = new Image();
+  img.onload = ()=>{ ageBadgeImg = img; ageBadgeImgReady = true; };
+  img.src = AGE_BADGE_IMG_SRC;
+})();
 const AGE_TIP_LINES = [
   "【网络游戏适龄提示】",
   "1. 本游戏《弹球肉鸽·深海弹射》为休闲弹射类单机游戏，包含卡通风格的轻度对抗与策略选择玩法，无血腥、色情、赌博内容。",
@@ -1352,26 +1360,22 @@ function drawParticles(){
   });
   ctx.globalAlpha=1;
 }
+function drawAgeBadgeImage(x,y,w,h){
+  if(ageBadgeImgReady && ageBadgeImg){
+    ctx.save();
+    ctx.shadowColor="rgba(0,0,0,.35)"; ctx.shadowBlur=10;
+    ctx.drawImage(ageBadgeImg, x, y, w, h);
+    ctx.restore();
+    return true;
+  }
+  return false;
+}
 function drawAgeBadge(){
   const b=AGE_BADGE;
-  ctx.save();
-  ctx.shadowColor="rgba(0,0,0,.45)"; ctx.shadowBlur=8;
-  ctx.fillStyle="#1565c0";
-  roundRect(b.x,b.y,b.w,b.h,14); ctx.fill();
-  ctx.shadowBlur=0;
-  ctx.strokeStyle="#fff"; ctx.lineWidth=3;
-  roundRect(b.x,b.y,b.w,b.h,14); ctx.stroke();
-  ctx.fillStyle="#fff"; ctx.textAlign="center";
-  ctx.font="bold 64px sans-serif";
-  ctx.fillText(AGE_RATING+"+", b.x+b.w/2, b.y+72);
-  ctx.font="bold 22px sans-serif";
-  ctx.fillText("CADPA", b.x+b.w/2, b.y+108);
-  ctx.font="22px sans-serif";
-  ctx.fillText("适龄提示", b.x+b.w/2, b.y+138);
-  ctx.font="18px sans-serif";
-  ctx.fillStyle="rgba(255,255,255,.85)";
-  ctx.fillText("点击查看", b.x+b.w/2, b.y+168);
-  ctx.restore();
+  if(!drawAgeBadgeImage(b.x,b.y,b.w,b.h)){
+    ctx.fillStyle="rgba(255,255,255,.25)"; ctx.font="22px sans-serif"; ctx.textAlign="left";
+    ctx.fillText("适龄标识加载中…", b.x, b.y+b.h/2);
+  }
 }
 function drawAgeTipOverlay(){
   ctx.fillStyle="rgba(0,8,24,.78)"; ctx.fillRect(0,0,W,H);
@@ -1382,10 +1386,12 @@ function drawAgeTipOverlay(){
   ctx.textAlign="center";
   ctx.fillStyle="#ffd54f"; ctx.font="bold 44px sans-serif";
   ctx.fillText("适龄提示说明", W/2, 300);
-  ctx.fillStyle="#1565c0";
-  roundRect(W/2-70, 320, 140, 100, 12); ctx.fill();
-  ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
-  ctx.fillText(AGE_RATING+"+", W/2, 392);
+  if(!drawAgeBadgeImage(W/2-66, 318, 132, 156)){
+    ctx.fillStyle="#1565c0";
+    roundRect(W/2-70, 320, 140, 100, 12); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.font="bold 52px sans-serif";
+    ctx.fillText(AGE_RATING+"+", W/2, 392);
+  }
   ctx.textAlign="left";
   ctx.fillStyle="rgba(255,255,255,.92)"; ctx.font="28px sans-serif";
   let ty=460;
