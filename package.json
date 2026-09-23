@@ -1,6 +1,6 @@
 {
   "name": "tanqiurouge",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "弹球肉鸽 · 深海弹射 — WebView APK (Capacitor)",
   "scripts": {
@@ -11,7 +11,7 @@
   "dependencies": {
     "@capacitor/android": "^7.2.0",
     "@capacitor/core": "^7.2.0",
-    "@capacitor/app": "^7.2.0"
+    "@capacitor/app": "^7.1.2"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.2.0"
