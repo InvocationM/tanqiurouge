@@ -91,6 +91,7 @@ jobs:
               )
           gradle.write_text(gtext, encoding="utf-8")
           PY
+          node scripts/patch-android-no-compress-pack.cjs
 
       - name: Apply app launcher icon
         run: node scripts/apply-android-icon.cjs

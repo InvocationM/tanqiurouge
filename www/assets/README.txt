@@ -1,3 +1,5 @@
+bgm/ — 随包 CC0 音频（游戏未加载，见 bgm/CREDITS.md）
+
 适龄提示官方标识（CADPA 12+）
 
 - 当前使用：cadpa-12plus.png（由团标样式 SVG 导出，便于 WebView 显示）
